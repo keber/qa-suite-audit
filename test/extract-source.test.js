@@ -17,6 +17,7 @@ const path     = require('node:path');
 
 const {
   extractEvidence,
+  countSerialDeclarations,
   extractFile,
   findTests,
   maskSource,
@@ -490,4 +491,70 @@ test('a test declared with test.slow is an ordinary test', (t) => {
   assert.equal(records.length, 1);
   assert.equal(records[0].skipped, false);
   assert.equal(aggregate(records)['D2.expected-failures'].count, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Config items: named, citable, one entry per suite
+// ---------------------------------------------------------------------------
+
+const SPEC_OK = "import { test, expect } from '@playwright/test';\ntest('[TC-A-001] x', async ({ page }) => { await expect(page).toHaveTitle('x'); });\n";
+
+test('the five config items are emitted per suite, keyed by suite id', (t) => {
+  const root = makeRepo(t, { 'playwright.config.ts': CONFIG, 'tests/a.spec.ts': SPEC_OK });
+
+  const result = extractEvidence(root);
+  const suiteId = result.suites[0].id;
+
+  for (const id of ['D3.retries-config', 'D3.serial-mode', 'D4.reporter-config', 'D4.trace-config', 'D4.artifact-retention']) {
+    assert.ok(result.items[id], id + ' must be a citable item');
+    assert.ok(result.items[id].bySuite[suiteId], id + ' must be keyed by the suite id');
+  }
+
+  const items = result.items;
+  assert.equal(items['D3.retries-config'].bySuite[suiteId].retries, 'process.env.CI ? 2 : 1');
+  assert.equal(items['D3.serial-mode'].bySuite[suiteId].fullyParallel, 'false');
+  assert.equal(items['D3.serial-mode'].bySuite[suiteId].workers, '1');
+  assert.equal(items['D4.trace-config'].bySuite[suiteId].trace, 'retain-on-failure');
+  assert.deepEqual(items['D4.reporter-config'].bySuite[suiteId].reporters, ['html', 'list', '@alex_neo/playwright-azure-reporter']);
+});
+
+test('artifact retention reads outputDir from the config and reports null when absent', (t) => {
+  const withDir = makeRepo(t, {
+    'playwright.config.ts': "import { defineConfig } from '@playwright/test';\nexport default defineConfig({\n  testDir: './tests',\n  outputDir: 'test-results',\n});\n",
+    'tests/a.spec.ts': SPEC_OK,
+  });
+  const without = makeRepo(t, {
+    'playwright.config.ts': "import { defineConfig } from '@playwright/test';\nexport default defineConfig({\n  testDir: './tests',\n});\n",
+    'tests/a.spec.ts': SPEC_OK,
+  });
+
+  const a = extractEvidence(withDir);
+  const b = extractEvidence(without);
+  assert.equal(a.items['D4.artifact-retention'].bySuite[a.suites[0].id].outputDir, 'test-results');
+  assert.equal(b.items['D4.artifact-retention'].bySuite[b.suites[0].id].outputDir, null);
+});
+
+test('serial declarations are counted from code, not from strings or comments', () => {
+  const src = [
+    "import { test } from '@playwright/test';",
+    "test.describe.serial('flow', () => { test('a', async () => {}); });",
+    "test.describe.configure({ mode: 'serial' });",
+    "test.describe.configure({ mode: 'parallel' });",
+    "// test.describe.serial('commented out', () => {});",
+    "const s = \"test.describe.serial('in a string', () => {})\";",
+  ].join('\n');
+
+  assert.deepEqual(countSerialDeclarations(src), { describeSerial: 1, configuredSerial: 1 });
+});
+
+test('serial usage is aggregated across the files of a suite', (t) => {
+  const serial = "import { test } from '@playwright/test';\ntest.describe.serial('flow', () => { test('a', async () => {}); });\n";
+  const root = makeRepo(t, {
+    'playwright.config.ts': CONFIG,
+    'tests/a.spec.ts': serial,
+    'tests/b.spec.ts': serial,
+  });
+
+  const r = extractEvidence(root);
+  assert.equal(r.items['D3.serial-mode'].bySuite[r.suites[0].id].describeSerial, 2);
 });

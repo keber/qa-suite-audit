@@ -12,6 +12,11 @@
  *   D5.priority-distribution
  *   D5.skip-ratio          D4.trace-config        D7.selector-mix
  *                          D4.reporter-config
+ *                          D4.artifact-retention
+ *
+ * The five config items are reported per suite, keyed by suite id, because a
+ * repository with two playwright configs has two answers and merging them would
+ * hide which suite the retries or the trace setting belong to.
  *
  * This file assigns no scores. It produces counts and per-test records that a
  * rubric level must cite. Attribution is per test, not per file: a file-level
@@ -248,6 +253,35 @@ function readFirstString(argsRaw) {
   return null;
 }
 
+/**
+ * Serial execution declared in source: describe.serial(...) and
+ * describe.configure({ mode: 'serial' }).
+ *
+ * Both are found on the masked copy so a mention inside a string or comment is
+ * not counted. The configure call is the exception on the argument side: the
+ * word 'serial' is a string literal, which masking blanks, so the options are
+ * read back from the raw source at the same offsets.
+ */
+const SERIAL_DESCRIBE    = /\btest\s*\.\s*describe\s*\.\s*serial\s*\(/g;
+const DESCRIBE_CONFIGURE = /\btest\s*\.\s*describe\s*\.\s*configure\s*\(/g;
+const SERIAL_MODE        = /\bmode\s*:\s*(['"`])serial\1/;
+
+function countSerialDeclarations(src) {
+  const masked = maskSource(src);
+  let configured = 0;
+
+  DESCRIBE_CONFIGURE.lastIndex = 0;
+  let m;
+  while ((m = DESCRIBE_CONFIGURE.exec(masked)) !== null) {
+    const openIdx  = m.index + m[0].length - 1;
+    const closeIdx = matchParen(masked, openIdx);
+    if (closeIdx === -1) continue;
+    if (SERIAL_MODE.test(src.slice(openIdx + 1, closeIdx))) configured++;
+  }
+
+  return { describeSerial: countIn(masked, SERIAL_DESCRIBE), configuredSerial: configured };
+}
+
 function countIn(text, re) {
   re.lastIndex = 0;
   const found = text.match(re);
@@ -340,6 +374,7 @@ function extractConfig(repoRoot, configRelPath) {
     trace:        inUse('trace'),
     screenshot:   inUse('screenshot'),
     video:        inUse('video'),
+    outputDir:    raw('outputDir') ?? readExpression(src, 'outputDir'),
   };
 }
 
@@ -433,6 +468,39 @@ function aggregate(records) {
   };
 }
 
+/**
+ * The five config-derived items, one entry per suite.
+ *
+ * These are facts read from the config and the suite's sources, never a verdict
+ * on them: whether retries of 2 are load tolerance or flake suppression is the
+ * agent's call (D3), and whether a trace setting is enough to diagnose is D4's.
+ */
+function configItems(suites) {
+  const bySuite = (pick) => Object.fromEntries(suites.map(s => [s.id, { config: s.config, ...pick(s) }]));
+
+  return {
+    'D3.retries-config': { bySuite: bySuite(s => ({ retries: s.configEvidence.retries })) },
+    'D3.serial-mode': {
+      bySuite: bySuite(s => ({
+        fullyParallel: s.configEvidence.fullyParallel,
+        workers: s.configEvidence.workers,
+        ...s.serialDeclarations,
+      })),
+    },
+    'D4.reporter-config': { bySuite: bySuite(s => ({ reporters: s.configEvidence.reporters })) },
+    'D4.trace-config': {
+      bySuite: bySuite(s => ({
+        trace: s.configEvidence.trace,
+        screenshot: s.configEvidence.screenshot,
+        video: s.configEvidence.video,
+      })),
+    },
+    // Only the config half of retention is read here. Whether the CI run
+    // publishes the output folder is D6.result-publication.
+    'D4.artifact-retention': { bySuite: bySuite(s => ({ outputDir: s.configEvidence.outputDir })) },
+  };
+}
+
 function ref(r) {
   return `${r.file}:${r.line}`;
 }
@@ -474,10 +542,18 @@ function extractEvidence(repoRoot, options = {}) {
 
   const suites = boundary.suites.map(suite => {
     const records = suite.files.flatMap(f => extractFile(repoRoot, f, caseIdPattern));
+    const serialDeclarations = suite.files
+      .map(f => countSerialDeclarations(fs.readFileSync(path.join(repoRoot, f), 'utf8')))
+      .reduce((a, b) => ({
+        describeSerial: a.describeSerial + b.describeSerial,
+        configuredSerial: a.configuredSerial + b.configuredSerial,
+      }), { describeSerial: 0, configuredSerial: 0 });
+
     return {
       id: suite.id,
       config: suite.config,
       configEvidence: extractConfig(repoRoot, suite.config),
+      serialDeclarations,
       items: aggregate(records),
       tests: records.sort((a, b) => (a.file + a.line).localeCompare(b.file + b.line)),
     };
@@ -500,7 +576,7 @@ function extractEvidence(repoRoot, options = {}) {
       testFiles: boundary.totals.testFiles,
       unclaimed: boundary.totals.unclaimed,
     },
-    items: aggregate(all),
+    items: { ...aggregate(all), ...configItems(suites) },
     suites,
     warnings: boundary.warnings,
   };
@@ -559,4 +635,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { extractEvidence, extractFile, findTests, maskSource, aggregate, DEFAULT_CASE_ID };
+module.exports = { extractEvidence, extractFile, findTests, maskSource, aggregate, countSerialDeclarations, DEFAULT_CASE_ID };

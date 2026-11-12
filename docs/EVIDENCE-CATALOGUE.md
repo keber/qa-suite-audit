@@ -12,6 +12,13 @@ Scope: **repository evidence only**. No CI API, no run history, no branch polici
 
 This catalogue defines what the scripts extract. It does not assign scores.
 
+**For editors:** an item is a table row whose first cell is one backticked id.
+Rows under a `D<n> - ...` heading are items the scripts emit today; rows under
+"Not extracted in v1" are items they do not. `test/catalogue.test.js` fails if
+that split disagrees with what `prepare()` actually emits, so add a row in the
+same change as the extractor, and never list a not-yet-extracted item in a
+dimension table.
+
 ## Contract
 
 ```
@@ -23,6 +30,8 @@ An agent that gathers and judges in the same step produces a score that cannot
 be diffed across runs: when the number moves, nobody can tell whether the suite
 changed or the model did. Every level assignment must name the evidence items
 that support it, and an item the scripts did not produce cannot support a level.
+Items v1 does not produce are listed in one place, "Not extracted in v1", so an
+agent never reads one as citable.
 
 Item ids are stable: `D<dimension>.<slug>`. They are the vocabulary the agent
 prompt and the report both speak.
@@ -34,7 +43,7 @@ A level the repository cannot witness is not scored. It is declared unreachable.
 | # | Dimension | Ceiling | Binding constraint |
 |---|---|---|---|
 | 1 | Oracle | 3 | needs a rule inventory in-repo (drops to 1 without one) |
-| 2 | Sensitivity | 3 | level 3 needs mutation evidence committed |
+| 2 | Sensitivity | 3 | level 3 needs mutation evidence committed (not yet extracted, issue #2) |
 | 3 | Determinism | 2 | level 3 asserts run behavior, not source state |
 | 4 | Diagnosis | 3 | - |
 | 5 | Business rule coverage | **2** | level 3 needs the deliberate exclusions written down (drops to 1 without a rule inventory) |
@@ -64,7 +73,8 @@ source rubric's verdict bands: they were calibrated for complete evidence.
 | `D1.ext-id-coverage` | tests whose title carries an external work item id (`[27499]`) | regex over titles |
 | `D1.rule-inventory` | rule documents present and rule ids declared | scan `01-specifications/**/01-business-rules.md` or equivalent |
 | `D1.spec-linkage` | case ids in tests that resolve to a documented case or rule | join `D1.tc-id-coverage` against `D1.rule-inventory` |
-| `D1.assert-literals` | expected values that are hardcoded literals vs derived from fixtures | AST-ish scan of `expect(...)` arguments |
+| `D1.automated-case-ids` | distinct case ids carried by test titles, upper-cased; the set `D5.covered-rules` and `D5.orphan-tests` are computed from | union of `caseId` over all tests |
+| `D1.risk-inventory` | a risk register is present (`_risks.md` beside the specifications): its path, risk count, severity tally and the declared risks | adapter read; `present: false` when absent |
 
 **Discriminates:** 0 vs 1 vs 2 from `D1.spec-linkage` density. An unlinked
 suite cannot exceed 1.
@@ -93,8 +103,8 @@ are never conflated.
 | `D2.skipped-tests` | declarations: `test.skip`, `test.fixme`, `describe.skip` | declaration scan |
 | `D2.conditional-skips` | runtime skips inside a body: `test.skip(condition, reason)` | body scan |
 | `D2.expected-failures` | `test.fail(...)`, which inverts the meaning of green | body scan |
-| `D2.mutation-config` | mutation testing configured (Stryker et al.) | dependency and config file scan |
 | `D2.soft-assertions` | `expect.soft` usage, which downgrades failure to warning | regex |
+| `D2.only-markers` | tests declared `test.only` or `describe.only`; a committed `only` silences every other test in its scope | declaration scan |
 
 **Assertion proxies.** A suite that layers assertions behind page objects has
 tests whose bodies contain no `expect(`. Counting those as assertless accuses the
@@ -110,7 +120,10 @@ behavior it names, and it is neither skipped nor asserting, so it is counted on
 its own.
 
 **Discriminates:** level 0 mechanically, from `D2.assertless-tests` plus
-`D2.weak-assertions`. Level 3 requires `D2.mutation-config` to be non-empty.
+`D2.weak-assertions`. The source rubric ties level 3 to mutation evidence, but
+`D2.mutation-config` is not extracted yet (issue #2), so that rule is not
+enforced: no script or validator rejects a level 3 for lacking it, and the
+ceiling of 3 is a statement about what the repository could witness, not a check.
 
 **Left to judgment:** 1 vs 2 - whether a test fails for causes unrelated to what
 it claims to protect. Needs reading the test.
@@ -128,15 +141,14 @@ D5, and a high ratio caps this dimension regardless of the rest.
 |---|---|---|
 | `D3.fixed-waits` | `waitForTimeout`, `sleep`, bare `setTimeout` in test code | regex, normalized per test |
 | `D3.conditional-waits` | `waitForSelector`, `waitForLoadState`, expect polling | regex |
-| `D3.retries-config` | configured retries, CI and local | config read |
-| `D3.serial-mode` | `describe.serial`, `fullyParallel: false`, `workers: 1` | config and source read |
-| `D3.shared-state` | module-level mutable bindings in test files | scan for `let`/`var` outside test bodies |
-| `D3.order-coupling` | tests referencing state produced by a previous test in the file | heuristic, flagged as inferential |
-| `D3.committed-run-artifacts` | run reports versioned in-repo that would let flakiness be measured | look for committed JSON or JUnit reports |
+| `D3.retries-config` | configured retries, verbatim (`2` or `process.env.CI ? 2 : 1`), reported per suite as `bySuite[<suite id>].retries` | config read |
+| `D3.serial-mode` | per suite: `fullyParallel` and `workers` as configured, plus counts of `describe.serial` and `describe.configure({ mode: 'serial' })` in the suite's files | config read and masked-source scan |
 
 **Discriminates:** 0 vs 1 vs 2. `D3.retries-config` above zero plus
-`D3.fixed-waits` above zero is strong evidence against level 2. Level 2 requires
-`D3.committed-run-artifacts` to exist: "measured" needs a measurement.
+`D3.fixed-waits` above zero is strong evidence against level 2. The rubric's
+"measured" wording would need committed run reports to witness, and
+`D3.committed-run-artifacts` is not extracted, so that requirement is not
+enforced today.
 
 **Left to judgment:** whether retries are a load-tolerance decision or a flake
 suppressor. Configs sometimes explain themselves in comments; the agent reads them.
@@ -149,18 +161,18 @@ suppressor. Configs sometimes explain themselves in comments; the agent reads th
 
 | Item | Measures | Extraction |
 |---|---|---|
-| `D4.trace-config` | `trace`, `screenshot`, `video` settings | config read |
-| `D4.reporter-config` | reporters configured, HTML or external | config read |
-| `D4.title-quality` | test titles that name a behavior vs a mechanism | title corpus, classified by the agent |
+| `D4.trace-config` | `trace`, `screenshot`, `video` settings from `use`, reported per suite | config read |
+| `D4.reporter-config` | reporter names configured (options are not reported as reporters), per suite | config read |
 | `D4.failure-context` | custom messages on assertions, `test.step` usage, annotations | regex |
-| `D4.artifact-retention` | whether artifacts survive the run (`outputDir`, CI publish step) | config and pipeline read |
+| `D4.artifact-retention` | the configured `outputDir` per suite (`null` when unset). Whether CI publishes it is `D6.result-publication`; the two are never merged | config read |
 
 **Discriminates:** 0 vs 1 vs 2 mechanically from `D4.trace-config` and
 `D4.failure-context`.
 
 **Left to judgment:** 2 vs 3 - whether the report names the broken business rule
-without opening code. That is a reading of `D4.title-quality` against
-`D1.rule-inventory`, not a count.
+without opening code. That is a reading of the test titles in `D1.test-inventory` against
+`D1.rule-inventory`, not a count. `D4.title-quality` would pre-classify them
+and is not extracted.
 
 ---
 
@@ -174,13 +186,15 @@ without opening code. That is a reading of `D4.title-quality` against
 | `D5.covered-rules` | rules with at least one test linked via case id | join with `D1.spec-linkage` |
 | `D5.uncovered-rules` | declared rules with no linked test | set difference |
 | `D5.orphan-tests` | tests whose case id resolves to no declared rule | set difference, other direction |
-| `D5.negative-tests` | tests whose title or body indicates a negative or boundary case | keyword and assertion-shape scan |
 | `D5.priority-distribution` | tests by declared priority tag (`@P0`, `[P1]`) | regex over titles |
 | `D5.skip-ratio` | skipped share of the suite | from `D2.skipped-tests` |
+| `D5.pending-markers` | count of `PENDING-CODE` markers across rule documents: information the analysis could not confirm | adapter scan |
+| `D5.risk-coverage` | risks from `D1.risk-inventory` cited by a test file, and those never cited; kept apart from rule coverage and **inferential**, since a citation is not an assertion | join of the register against risk ids found in suite files |
 
-**Discriminates:** 0 vs 1 from `D5.negative-tests`. 2 vs 3 from whether
-`D5.uncovered-rules` is computable at all - level 3 requires the exclusions to be
-listed, which requires the catalogue.
+**Discriminates:** 0 vs 1 from `D5.covered-rules` (the rubric's negative-case
+wording would use `D5.negative-tests`, which is not extracted yet, issue #3, so
+it is not enforced). 2 vs 3 from whether `D5.uncovered-rules` is computable at
+all - level 3 requires the exclusions to be listed, which requires the catalogue.
 
 **Left to judgment:** whether an uncovered rule is a deliberate exclusion or an
 oversight. The repository rarely says.
@@ -215,19 +229,41 @@ exists to prevent.
 | Item | Measures | Extraction |
 |---|---|---|
 | `D7.selector-mix` | semantic (`getByRole`, `getByLabel`, `getByTestId`) vs raw string locators | regex, reported as a ratio |
-| `D7.duplication` | repeated statement sequences across test files | normalized token windows |
-| `D7.page-object-usage` | whether interaction is layered or inline in tests | import graph of test files |
 | `D7.file-size` | lines and test count per file | count |
-| `D7.title-vocabulary` | titles naming implementation (button, click, modal) vs domain terms | classified by the agent |
-| `D7.dead-markers` | long-lived `skip`, `fixme`, `BLOCKED` or `TODO` annotations | regex |
 
-**Discriminates:** 0 vs 1 vs 2 from `D7.selector-mix`, `D7.duplication` and
-`D7.page-object-usage`.
+**Discriminates:** 0 vs 1 vs 2 from `D7.selector-mix` and `D7.file-size`. The
+rubric also weighs duplication and page-object layering; neither is extracted
+yet (`D7.duplication`, and `D7.page-object-usage` in issue #7), so they are not
+enforced.
 
 **Not scored, declared unreachable:** 3, unless the repository carries explicit
 review and retirement process evidence (CODEOWNERS covering the suite, a
 documented retirement policy). Commit history is in-repo and may support this
 later; v1 does not read it.
+
+---
+
+## Not extracted in v1
+
+Items the rubric or an earlier draft of this catalogue names, which no script
+emits. They are not citable: the validator rejects them as `fabricated-item`.
+They stay listed so the gap is visible and so a future extractor has a name and
+a definition waiting. Moving one into a dimension table is part of the change
+that makes the extractor emit it.
+
+| Item | Would measure | Why not extracted |
+|---|---|---|
+| `D1.assert-literals` | expected values that are hardcoded literals vs derived from fixtures | needs an expression-level parse of `expect(...)` arguments; the extractor is a masked-text scanner |
+| `D2.mutation-config` | mutation testing configured (Stryker et al.) | dependency and config file scan not written; scheduled in issue #2 |
+| `D3.committed-run-artifacts` | run reports versioned in-repo that would let flakiness be measured | no committed-report scan exists |
+| `D3.order-coupling` | tests referencing state produced by a previous test in the file | needs data-flow reading; at best an inferential heuristic, not attempted |
+| `D3.shared-state` | module-level mutable bindings in test files | needs scope tracking outside test bodies; not written |
+| `D4.title-quality` | test titles that name a behavior vs a mechanism | a classification of meaning, which is judgment and belongs to the agent, not a script |
+| `D5.negative-tests` | tests whose title or body indicates a negative or boundary case | keyword and assertion-shape scan not written; scheduled in issue #3 |
+| `D7.dead-markers` | long-lived `skip`, `fixme`, `BLOCKED` or `TODO` annotations | "long-lived" needs commit history, which v1 does not read |
+| `D7.duplication` | repeated statement sequences across test files | normalized token-window comparison not written |
+| `D7.page-object-usage` | whether interaction is layered or inline in tests | import graph of test files not written; scheduled in issue #7 |
+| `D7.title-vocabulary` | titles naming implementation (button, click, modal) vs domain terms | a classification of meaning, which is judgment and belongs to the agent |
 
 ---
 
