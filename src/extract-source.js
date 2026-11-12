@@ -95,6 +95,65 @@ const UNCONDITIONAL_BODY_SKIP = /\btest\.(skip|fixme)\s*\(\s*true\s*[,)]/;
  */
 const EXPECTED_FAILURE = /\btest\.fail\s*\(/g;
 
+/**
+ * Negative and boundary vocabulary for D5.negative-tests, in ONE place, English
+ * and Spanish, because suites are written in both.
+ *
+ * The result is a signal, not a proof, and the item says so (inferential).
+ * The tradeoffs that stay in the vocabulary on purpose:
+ *   - Titles are matched whole-word and case-insensitive, after accents are
+ *     stripped, so the lists below are written unaccented and still match
+ *     "inválido", "límite" and "vacía". A substring match would fire inside
+ *     unrelated words.
+ *   - "error", "fail" and "limit" also appear in titles of HAPPY paths ("shows
+ *     the error page", "does not fail on reload", "limit selector renders").
+ *     Dropping them would miss most real negative titles, so they stay and the
+ *     reader is expected to open the listed tests.
+ *   - "edge" and "max"/"min" can name a browser or a control rather than a case.
+ *   - A negative test with none of these words in its title and no body shape
+ *     below is simply not seen. A missing signal is not evidence of absence.
+ *
+ * Body shapes run over the MASKED source, so a word inside a string or a comment
+ * never counts. They are limited to shapes that only make sense for a failing
+ * case. `.not.toBeVisible()` and `.toBeDisabled()` are deliberately absent: too
+ * common in ordinary flows to say anything. `.not.toThrow(` is excluded because
+ * it asserts the success path.
+ */
+const NEGATIVE_VOCABULARY = (() => {
+  // \b is ASCII-only in JavaScript, so word edges are spelled with Unicode
+  // classes. A space inside a term matches any run of whitespace.
+  const START = '(?<![\\p{L}\\p{N}_])';
+  const END   = '(?![\\p{L}\\p{N}_])';
+  const words = (terms) => new RegExp(`${START}(?:${terms.map(t => t.replace(/ /g, '\\s+')).join('|')})${END}`, 'iu');
+
+  return {
+    negativeTitle: words([
+      // English
+      'invalid', 'reject(?:s|ed|ing)?', 'errors?', 'fail(?:s|ed|ure|ures)?', 'unauthori[sz]ed', 'forbidden',
+      'denied', 'not allowed', 'cannot', 'can not', "can't", 'missing', 'wrong', 'incorrect',
+      'duplicate[ds]?', 'expired',
+      // Spanish (unaccented: titles are normalized before matching)
+      'invalid[oa]s?', 'rechaz(?:a|an|ado|ada)', 'errores', 'no permit(?:e|en)', 'no autorizad[oa]s?',
+      'denegad[oa]s?', 'prohibid[oa]s?', 'falta(?:n)?', 'faltantes?', 'incorrect[oa]s?', 'duplicad[oa]s?',
+      'vencid[oa]s?', 'expirad[oa]s?', 'no pued(?:e|en)', 'sin permisos?',
+    ]),
+    boundaryTitle: words([
+      // English
+      'limits?', 'boundar(?:y|ies)', 'edge', 'max(?:imum)?', 'min(?:imum)?', 'empty', 'zero', 'overflow',
+      'exceed(?:s|ed)?', 'too long', 'too many',
+      // Spanish (unaccented)
+      'limites?', 'borde', 'maxim[oa]s?', 'minim[oa]s?', 'vaci[oa]s?', 'cero', 'excede(?:n)?', 'supera(?:n)?',
+    ]),
+    // toThrow / rejects, and a 4xx or 5xx literal compared with a response status.
+    negativeBody: /(?<!\.not)\.toThrow(?:Error)?\s*\(|\.rejects\s*\.|\btoHaveStatus\s*\(\s*[45]\d\d\b|\bstatus(?:\s*\(\s*\))?\s*\)\s*\.(?:toBe|toEqual|toStrictEqual)\s*\(\s*[45]\d\d\b/,
+  };
+})();
+
+/** Strip accents so one unaccented vocabulary covers both spellings. */
+function foldAccents(text) {
+  return text.normalize('NFD').replace(/\p{M}/gu, '');
+}
+
 /** Case id such as TC-CON-002 or TC-0014. Letters may precede the number. */
 const DEFAULT_CASE_ID = /\bTC-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d+\b|\bTC-\d+\b/i;
 /** External work item id at the head of a title, such as [27499]. */
@@ -328,8 +387,13 @@ function extractFile(repoRoot, relPath, caseIdPattern = DEFAULT_CASE_ID) {
       caseId:     (caseIdPattern.exec(title) || [null])[0],
       externalId: (EXTERNAL_ID.exec(title) || [null, null])[1],
       priority:   priority ? `P${priority[1] ?? priority[2]}` : null,
+      // Title is read raw (not masked): the vocabulary lives in the words a
+      // human wrote. The body is masked so a string cannot trigger it.
+      negativeSignal:
+        NEGATIVE_VOCABULARY.negativeTitle.test(foldAccents(title)) || NEGATIVE_VOCABULARY.negativeBody.test(body),
+      boundarySignal: NEGATIVE_VOCABULARY.boundaryTitle.test(foldAccents(title)),
       assertions,
-      softAssertions:   countIn(body, SOFT_ASSERTION),
+      softAssertions:  countIn(body, SOFT_ASSERTION),
       weakAssertions:   countIn(body, WEAK_ASSERTION),
       fixedWaits:       countIn(body, FIXED_WAIT),
       conditionalWaits: countIn(body, CONDITIONAL_WAIT),
@@ -421,6 +485,8 @@ function aggregate(records) {
   const assertless    = active.filter(r => r.assertions === 0 && r.assertionProxies === 0);
   const indirectOnly  = active.filter(r => r.assertions === 0 && r.assertionProxies > 0);
   const weakOnly      = active.filter(r => r.assertions > 0 && r.assertions === r.weakAssertions);
+  const negativeTests = active.filter(r => r.negativeSignal);
+  const boundaryTests = active.filter(r => r.boundarySignal);
   const semantic      = sum(r => r.selectors.semantic);
   const testId        = sum(r => r.selectors.testId);
   const rawSelectors  = sum(r => r.selectors.raw);
@@ -458,6 +524,15 @@ function aggregate(records) {
     // D5
     'D5.priority-distribution': tally(records.map(r => r.priority)),
     'D5.skip-ratio':            { ratio: ratio(total - active.length, total) },
+    // Active tests only: a skipped test does not protect anything. Evidence for
+    // the judge, never a threshold - see NEGATIVE_VOCABULARY for what it misses.
+    'D5.negative-tests': {
+      evidenceClass: 'inferential',
+      negative: { count: negativeTests.length, tests: negativeTests.map(ref).sort() },
+      boundary: { count: boundaryTests.length, tests: boundaryTests.map(ref).sort() },
+      of: active.length,
+      vocabulary: 'NEGATIVE_VOCABULARY in src/extract-source.js (documented in docs/EVIDENCE-CATALOGUE.md, D5.negative-tests)',
+    },
 
     // D7
     'D7.selector-mix': {
@@ -635,4 +710,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { extractEvidence, extractFile, findTests, maskSource, aggregate, countSerialDeclarations, DEFAULT_CASE_ID };
+module.exports = { extractEvidence, extractFile, findTests, maskSource, aggregate, countSerialDeclarations, DEFAULT_CASE_ID, NEGATIVE_VOCABULARY };

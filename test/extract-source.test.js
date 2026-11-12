@@ -558,3 +558,154 @@ test('serial usage is aggregated across the files of a suite', (t) => {
   const r = extractEvidence(root);
   assert.equal(r.items['D3.serial-mode'].bySuite[r.suites[0].id].describeSerial, 2);
 });
+
+// ---------------------------------------------------------------------------
+// D5.negative-tests
+// ---------------------------------------------------------------------------
+
+/** One-assertion test with the given title and body, for signal probes. */
+function probe(title, body = "await expect(page.locator('#a')).toHaveText('1');") {
+  return `test(${JSON.stringify(title)}, async ({ page }) => { ${body} });`;
+}
+
+const PW_HEAD = "import { test, expect } from '@playwright/test';\n";
+
+function signalsFor(t, title, body) {
+  const [r] = recordsFor(t, PW_HEAD + probe(title, body));
+  return { negative: r.negativeSignal, boundary: r.boundarySignal };
+}
+
+test('an English negative title is a negative signal', (t) => {
+  for (const title of [
+    'rejects an invalid email', 'shows an error for a wrong password', 'returns 403 forbidden',
+    'unauthorized user cannot export', 'unauthorised access is denied', 'duplicate code is not allowed',
+    'expired token fails', 'missing field blocks submit',
+  ]) {
+    assert.equal(signalsFor(t, title).negative, true, title);
+  }
+});
+
+test('a Spanish negative title is a signal, accented or not', (t) => {
+  for (const title of [
+    'rechaza un correo inválido', 'rechaza un correo invalido', 'no permite guardar sin nombre',
+    'usuario no autorizado recibe error', 'acceso denegado al perfil', 'campo prohibido',
+    'falta el monto', 'valor incorrecto', 'codigo duplicado', 'token vencido', 'token expirado',
+    'no puede editar', 'sin permiso para borrar',
+  ]) {
+    assert.equal(signalsFor(t, title).negative, true, title);
+  }
+});
+
+test('boundary titles are a boundary signal in both languages, accented or not', (t) => {
+  for (const title of [
+    'accepts the maximum length', 'at the limit of 10 items', 'empty list shows hint', 'zero quantity',
+    'edge case on page break', 'too many rows', 'name too long', 'quantity exceeds stock', 'minimum amount',
+    'valor en el límite', 'valor en el limite', 'lista vacía', 'lista vacia', 'monto máximo', 'monto maximo',
+    'monto mínimo', 'monto minimo', 'cantidad cero', 'excede el stock', 'supera el tope', 'caso borde',
+  ]) {
+    assert.equal(signalsFor(t, title).boundary, true, title);
+  }
+});
+
+test('title matching is word bounded and case-insensitive', (t) => {
+  assert.equal(signalsFor(t, 'REJECTS bad input').negative, true);
+  assert.equal(signalsFor(t, 'failsafe mode is shown').negative, false, '"fails" inside a longer word');
+  assert.equal(signalsFor(t, 'lists the minimal profile').boundary, false, '"min" is not "minimal"');
+  assert.equal(signalsFor(t, 'keeps the zeroed counter').boundary, false);
+});
+
+test('a test may be both negative and boundary', (t) => {
+  assert.deepEqual(signalsFor(t, 'rejects an empty name'), { negative: true, boundary: true });
+});
+
+test('a happy-path test carries no signal', (t) => {
+  assert.deepEqual(signalsFor(t, 'creates an invoice for the selected customer'), { negative: false, boundary: false });
+});
+
+test('a body-only negative is found from toThrow, rejects and 4xx or 5xx statuses', (t) => {
+  for (const body of [
+    'expect(() => parse("x")).toThrow();',
+    'await expect(save()).rejects.toThrow("no");',
+    'await expect(save()).rejects.toBeDefined();',
+    'expect(response.status()).toBe(400);',
+    'expect(res.status()).toEqual(403);',
+    'expect(res.status()).toBe(599);',
+    'await expect(res).toHaveStatus(404);',
+  ]) {
+    assert.equal(signalsFor(t, 'handles the request', body).negative, true, body);
+  }
+});
+
+test('success statuses, rendering assertions and disabled states are not negative signals', (t) => {
+  for (const body of [
+    'expect(response.status()).toBe(200);',
+    'expect(response.status()).toBe(204);',
+    'expect(response.status()).toBe(600);',
+    'expect(() => parse("1")).not.toThrow();',
+    'await expect(page.locator("#a")).not.toBeVisible();',
+    'await expect(page.locator("#a")).toBeDisabled();',
+  ]) {
+    assert.equal(signalsFor(t, 'handles the request', body).negative, false, body);
+  }
+});
+
+test('a vocabulary word inside a string literal or comment of the body does not count', (t) => {
+  const [r] = recordsFor(t, PW_HEAD + [
+    "test('creates the record', async ({ page }) => {",
+    "  // an invalid, rejected and empty case lives elsewhere; expect(...).toThrow() is not used here",
+    "  console.log('invalid input, rejects, toThrow(, status 400, empty');",
+    "  await expect(page.locator('#a')).toHaveText('invalid');",
+    '});',
+  ].join('\n'));
+
+  assert.equal(r.negativeSignal, false);
+  assert.equal(r.boundarySignal, false);
+});
+
+test('title and body signals are independent', (t) => {
+  assert.deepEqual(signalsFor(t, 'maximum length is accepted', 'expect(() => parse("x")).toThrow();'), { negative: true, boundary: true });
+  assert.deepEqual(signalsFor(t, 'maximum length is accepted'), { negative: false, boundary: true });
+});
+
+test('negative-tests aggregates active tests only, with references and a documented vocabulary', (t) => {
+  const records = recordsFor(t, PW_HEAD + [
+    probe('rejects an invalid email'),
+    probe('empty cart shows hint'),
+    probe('rejects an empty name'),
+    probe('creates an invoice'),
+    "test.skip('rejects a parked case', async () => { await expect(1).toBe(1); });",
+  ].join('\n'));
+
+  const item = aggregate(records)['D5.negative-tests'];
+  assert.equal(item.evidenceClass, 'inferential');
+  assert.equal(item.of, 4, 'the skipped test is outside the population');
+  assert.equal(item.negative.count, 2);
+  assert.equal(item.boundary.count, 2);
+  assert.equal(item.negative.tests.length, 2);
+  assert.match(item.negative.tests[0], /^tests\/a\.spec\.ts:\d+$/);
+  assert.deepEqual(item.negative.tests, [...item.negative.tests].sort());
+  assert.match(item.vocabulary, /NEGATIVE_VOCABULARY/);
+});
+
+test('negative-tests is emitted by the extractor, assigns no judgment and sets no threshold', (t) => {
+  const root = makeRepo(t, {
+    'playwright.config.ts': CONFIG,
+    'tests/a.spec.ts': PW_HEAD + probe('rejects an invalid email') + '\n' + probe('creates an invoice'),
+  });
+
+  const item = extractEvidence(root).items['D5.negative-tests'];
+  assert.equal(item.negative.count, 1);
+  assert.equal(item.of, 2);
+
+  const json = JSON.stringify(item);
+  for (const key of ['level', 'score', 'verdict', 'rating', 'threshold', 'cap', 'bound']) {
+    assert.ok(!json.includes(`"${key}"`), `evidence must not contain a ${key} key`);
+  }
+});
+
+test('the vocabulary is exported as one constant holding both lists and the body shapes', () => {
+  const { NEGATIVE_VOCABULARY } = require('../src/extract-source.js');
+  assert.ok(NEGATIVE_VOCABULARY.negativeTitle instanceof RegExp);
+  assert.ok(NEGATIVE_VOCABULARY.boundaryTitle instanceof RegExp);
+  assert.ok(NEGATIVE_VOCABULARY.negativeBody instanceof RegExp);
+});
