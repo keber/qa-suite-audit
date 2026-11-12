@@ -209,10 +209,11 @@ and is not extracted.
 | `D5.skip-ratio` | skipped share of the suite | from `D2.skipped-tests` |
 | `D5.pending-markers` | count of `PENDING-CODE` markers across rule documents: information the analysis could not confirm | adapter scan |
 | `D5.risk-coverage` | risks from `D1.risk-inventory` cited by a test file, and those never cited; kept apart from rule coverage and **inferential**, since a citation is not an assertion | join of the register against risk ids found in suite files |
+| `D5.negative-tests` | active tests whose title or body indicates a negative case (rejection, invalid input, error status, `toThrow`) or a boundary case (limit, empty, zero, maximum), as `negative` and `boundary` lists of `file:line` plus `of` active tests; a test may be in both. **Inferential**: a keyword is not proof the test exercises the case, and a missing keyword is not proof it does not. Per test, `negativeSignal` and `boundarySignal` | title vocabulary (English and Spanish, accent-insensitive) and masked-body assertion shapes; both live in `NEGATIVE_VOCABULARY` in `src/extract-source.js`, echoed in the item's `vocabulary` field |
 
-**Discriminates:** 0 vs 1 from `D5.covered-rules` (the rubric's negative-case
-wording would use `D5.negative-tests`, which is not extracted yet, issue #3, so
-it is not enforced). 2 vs 3 from whether `D5.uncovered-rules` is computable at
+**Discriminates:** 0 vs 1 from `D5.covered-rules`, with `D5.negative-tests` as
+the signal for the rubric's negative-case wording (inferential: the agent reads
+the listed tests before relying on it; no count is a threshold). 2 vs 3 from whether `D5.uncovered-rules` is computable at
 all - level 3 requires the exclusions to be listed, which requires the catalogue.
 
 **Left to judgment:** whether an uncovered rule is a deliberate exclusion or an
@@ -277,7 +278,6 @@ that makes the extractor emit it.
 | `D3.order-coupling` | tests referencing state produced by a previous test in the file | needs data-flow reading; at best an inferential heuristic, not attempted |
 | `D3.shared-state` | module-level mutable bindings in test files | needs scope tracking outside test bodies; not written |
 | `D4.title-quality` | test titles that name a behavior vs a mechanism | a classification of meaning, which is judgment and belongs to the agent, not a script |
-| `D5.negative-tests` | tests whose title or body indicates a negative or boundary case | keyword and assertion-shape scan not written; scheduled in issue #3 |
 | `D7.dead-markers` | long-lived `skip`, `fixme`, `BLOCKED` or `TODO` annotations | "long-lived" needs commit history, which v1 does not read |
 | `D7.duplication` | repeated statement sequences across test files | normalized token-window comparison not written |
 | `D7.page-object-usage` | whether interaction is layered or inline in tests | import graph of test files not written; scheduled in issue #7 |
