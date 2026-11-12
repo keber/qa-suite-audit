@@ -81,6 +81,41 @@ each dimension it gives you:
 A dimension with `determined` set is closed. Restating its reasoning is fine;
 changing its number is not.
 
+## Questions for the team
+
+The input also carries `teamQuestions`: facts only a person on the team can
+give, such as whether a failing run blocks the merge or whether flakiness is
+measured anywhere. They are derived data, not evidence: they sit outside
+`items` and are not part of the evidence digest. Each entry has these fields:
+
+- `id` - a stable slug such as `D6.merge-blocking`.
+- `dimension` - the dimension number it concerns.
+- `question` - the exact question to put to a person.
+- `reason` - why the repository cannot settle it.
+- `source` - where the question comes from:
+  - `ceiling`: a structural v1 ceiling below 3, for a reason the repository
+    cannot witness (flakiness across runs, CI server policy, review process).
+  - `cap`: a calibrated cap applied to this repository by a threshold
+    (`D2.sensitivity-measured`).
+  - `evidence`: a data-driven question, one per pipeline filter whose value is a
+    variable (from `D6.run-scope`).
+- `unlocks` - the highest level an answer could make reachable, after counting
+  every other cap that would still apply; `null` when the question only
+  informs. A question that would lift nothing is not emitted.
+- `readByThisRelease` - whether an artifact this release extracts could change
+  the bound.
+
+`readByThisRelease` is true for two questions only: a rule inventory committed
+to the repository (D1) and a mutation testing configuration committed to it
+(D2). For those, a committed answer lifts the bound once the evidence is
+extracted again, which produces a new digest and a new audit. For every other
+question nothing in this release reads the answer: it is for the human reader
+of the report, it records what a future extractor would need, and the bound
+stays where it is even if the team answers.
+
+They are not yours to answer. Do not guess an answer, infer one from the code,
+or raise a bound because the answer is probably yes.
+
 ## How to answer an open dimension
 
 1. Read `question`. It names the one thing you cannot get from counts.

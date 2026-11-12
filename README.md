@@ -72,6 +72,14 @@ npx qa-suite-audit report audit/input.json audit/verdict.json --format html --ou
 npx qa-suite-audit report audit/input.json audit/verdict.json --format allure --out allure-results
 ```
 
+Where a ceiling or cap exists only because a person has to answer, the input
+lists the exact question in `teamQuestions` and every report prints it under
+"Questions for the team", marked `read by this release` or `for the reader`. The
+judge never answers them. Only two are read by this release: a rule inventory
+or a mutation config committed to the repository lifts its bound once the
+evidence is extracted again. The rest are for whoever reads the report; the
+bound stays where it is.
+
 `report` refuses to render an invalid verdict. A report is a claim about a
 suite; publishing one drawn from evidence that no longer matches would be worse
 than publishing nothing.

@@ -42,6 +42,7 @@ const { buildItems }        = require('./traceability.js');
 const { extractPipelines }  = require('./extract-pipelines.js');
 const { extractMutationConfig } = require('./extract-mutation.js');
 const { suiteTypeSignals }  = require('./suite-type.js');
+const { printable }         = require('./sanitize.js');
 
 const THRESHOLDS = JSON.parse(fs.readFileSync(path.join(__dirname, 'thresholds.json'), 'utf8'));
 
@@ -109,10 +110,10 @@ function boundDimensions(source, ruleItems, pipes) {
     if (d.n === 1) {
       if (!hasInventory) {
         ceiling = 1; cap = 1;
-        constraints.push(note('D1.traceability-floor', 'no rule inventory in the repository', 'ceiling lowered to 1'));
+        constraints.push(note('D1.traceability-floor', 'no rule inventory in the repository', 'ceiling lowered to 1', 1));
       } else if (coveredRatio === 0) {
         cap = 1;
-        constraints.push(note('D1.traceability-floor', `covered rules ratio ${fmt(coveredRatio)}`, 'capped at 1'));
+        constraints.push(note('D1.traceability-floor', `covered rules ratio ${fmt(coveredRatio)}`, 'capped at 1', 1));
       }
     }
 
@@ -123,7 +124,7 @@ function boundDimensions(source, ruleItems, pipes) {
         cap = 0;
         constraints.push(note(t.id,
           `assertless ${pct(assertShare)} (limit ${pct(t.value.assertlessShare)}), rendering-only ${pct(weakShare)} (limit ${pct(t.value.weakOnlyShare)})`,
-          'capped at 0 - tests that cannot fail are a characteristic of this suite'));
+          'capped at 0 - tests that cannot fail are a characteristic of this suite', 0));
       }
 
       // Both caps are recorded when both apply, and the lower one decides: the
@@ -134,7 +135,7 @@ function boundDimensions(source, ruleItems, pipes) {
         cap = Math.min(cap, 2);
         constraints.push(note(m.id,
           'no mutation testing configuration found in the repository',
-          'capped at 2 - level 3 needs measured sensitivity; a rule broken on purpose leaves no trace v1 reads'));
+          'capped at 2 - level 3 needs measured sensitivity; a rule broken on purpose leaves no trace v1 reads', 2));
       }
     }
 
@@ -142,22 +143,22 @@ function boundDimensions(source, ruleItems, pipes) {
       const t = threshold('D3.waiting-as-strategy');
       if (waitsPerTest >= t.value.fixedWaitsPerTest) {
         cap = 1;
-        constraints.push(note(t.id, `${waitsPerTest} fixed waits per test (limit ${t.value.fixedWaitsPerTest})`, 'capped at 1'));
+        constraints.push(note(t.id, `${waitsPerTest} fixed waits per test (limit ${t.value.fixedWaitsPerTest})`, 'capped at 1', 1));
       }
     }
 
     if (d.n === 4 && !hasArtifact) {
       cap = 1;
-      constraints.push(note('D4.artifacts-present', 'no trace, screenshot or video configured', 'capped at 1'));
+      constraints.push(note('D4.artifacts-present', 'no trace, screenshot or video configured', 'capped at 1', 1));
     }
 
     if (d.n === 5) {
       if (!hasInventory) {
         ceiling = 1; cap = 1;
-        constraints.push(note('D5.coverage-floor', 'no rule inventory in the repository', 'ceiling lowered to 1'));
+        constraints.push(note('D5.coverage-floor', 'no rule inventory in the repository', 'ceiling lowered to 1', 1));
       } else if (coveredRatio === 0) {
         cap = 1;
-        constraints.push(note('D5.coverage-floor', 'no declared rule is linked to an automated case', 'capped at 1'));
+        constraints.push(note('D5.coverage-floor', 'no declared rule is linked to an automated case', 'capped at 1', 1));
       }
     }
 
@@ -168,7 +169,7 @@ function boundDimensions(source, ruleItems, pipes) {
       floor = runs ? 1 : 0;
       constraints.push(note(t.id,
         `${runningPipes} pipeline(s) both invoke the runner and point at the suite`,
-        runs ? 'determined at 1' : 'determined at 0'));
+        runs ? 'determined at 1' : 'determined at 0', cap));
     }
 
     if (d.n === 7) {
@@ -179,7 +180,7 @@ function boundDimensions(source, ruleItems, pipes) {
       const hasSelectors = (si['D7.selector-mix'].semantic + si['D7.selector-mix'].testId + si['D7.selector-mix'].raw) > 0;
       if (hasSelectors && semanticShare < t.value.semanticSelectorShare) {
         cap = 1;
-        constraints.push(note(t.id, `semantic selector share ${pct(semanticShare)} (limit ${pct(t.value.semanticSelectorShare)})`, 'capped at 1'));
+        constraints.push(note(t.id, `semantic selector share ${pct(semanticShare)} (limit ${pct(t.value.semanticSelectorShare)})`, 'capped at 1', 1));
       }
     }
 
@@ -200,9 +201,14 @@ function boundDimensions(source, ruleItems, pipes) {
   return out;
 }
 
-function note(thresholdId, observed, effect) {
+/**
+ * `capsAt` is the highest level this constraint leaves reachable, kept as a
+ * number so the team questions can tell which caps an answer would remove
+ * without reading the `effect` prose.
+ */
+function note(thresholdId, observed, effect, capsAt) {
   const t = threshold(thresholdId);
-  return { threshold: thresholdId, kind: t.kind, rule: t.rule, observed, effect };
+  return { threshold: thresholdId, kind: t.kind, rule: t.rule, observed, effect, capsAt };
 }
 
 /** Items an assigned level must cite. A level citing nothing else is invalid. */
@@ -226,6 +232,166 @@ const QUESTION = {
   6: null,
   7: 'Read the test names and the largest files. Do names describe behavior or implementation, and is duplication structural or incidental?',
 };
+
+// ---------------------------------------------------------------------------
+// Questions for the team
+// ---------------------------------------------------------------------------
+//
+// A ceiling keeps the audit repeatable by silencing a question only a person
+// can answer. These are those questions, written out so nobody has to guess
+// them. The static ones come from the bounds and the variable-filter ones from
+// D6.run-scope; none is evidence. They sit outside `items`, are built after the
+// evidence digest is computed, and never move a bound.
+//
+// What an answer is worth is stated per question, not assumed. `readByThisRelease`
+// is true only where an artifact this release extracts could change the bound:
+// a committed rule inventory (D1) or mutation config (D2). For every other
+// question no extractor reads the answer, so it is for the human reader of the
+// report and the bound stays; the question records what a future extractor
+// would need.
+
+/**
+ * Every question whose text is fixed, in one place.
+ *
+ *   source 'ceiling'  applies while the dimension's structural ceiling is below 3
+ *                     (the reason is then CEILING_REASON, so the why is stated once)
+ *   source 'cap'      applies while `threshold` capped this repository; the
+ *                     constraint it names is the one the answer would remove
+ *
+ * `unlocks` is the most the rubric allows if answered. `lifts` names the
+ * constraints (by threshold id) an answer would remove; any other constraint
+ * stays, and the level actually reachable is the lowest of those. A question
+ * whose honest level is not above the current bound would lift nothing, so it
+ * is not asked. `onlyWhenDeterminedAt` restricts a question to a dimension
+ * settled at that level (D6 is settled either way).
+ */
+const STATIC_TEAM_QUESTIONS = [
+  { id: 'D1.rule-inventory', dimension: 1, source: 'ceiling', unlocks: 3, readByThisRelease: true,
+    lifts: ['D1.traceability-floor'],
+    question: 'Are the business rules this suite protects written down anywhere outside this repository, and where?' },
+  { id: 'D2.sensitivity-measured', dimension: 2, source: 'cap', threshold: 'D2.sensitivity-measured', unlocks: 3, readByThisRelease: true,
+    question: 'Is mutation testing run against this suite anywhere, and where is its configuration?',
+    reason: 'only a mutation testing configuration committed to this repository is read by this release, and none was found; a rule broken on purpose by hand also satisfies the rubric but leaves no trace this release can read' },
+  { id: 'D3.flakiness-measured', dimension: 3, source: 'ceiling', unlocks: 3, readByThisRelease: false,
+    question: 'Is the failure rate of these tests across runs measured anywhere, and where can it be read?' },
+  { id: 'D5.deliberate-exclusions', dimension: 5, source: 'ceiling', unlocks: 3, readByThisRelease: false,
+    question: 'Are any business rules left out of the suite on purpose, and where is that decision written down?' },
+  { id: 'D6.merge-blocking', dimension: 6, source: 'ceiling', unlocks: 3, readByThisRelease: false,
+    lifts: ['D6.runs-the-suite'], onlyWhenDeterminedAt: 1,
+    question: 'Does a failing run of this suite block the merge, and where is that configured?' },
+  { id: 'D6.deployment-condition', dimension: 6, source: 'ceiling', unlocks: 3, readByThisRelease: false,
+    lifts: ['D6.runs-the-suite'], onlyWhenDeterminedAt: 1,
+    question: 'Is a passing run of this suite a condition of deployment, and where is that configured?' },
+  // With no pipeline in this repository running the suite, gating is moot. The
+  // useful fact is whether one exists elsewhere; a pipeline alone reaches level 1.
+  { id: 'D6.external-pipeline', dimension: 6, source: 'ceiling', unlocks: 1, readByThisRelease: false,
+    lifts: ['D6.runs-the-suite'], onlyWhenDeterminedAt: 0,
+    question: 'Does this suite run from a pipeline defined outside this repository (another repository, a scheduled job or a release definition), and where is it defined?' },
+  { id: 'D7.review-retirement', dimension: 7, source: 'ceiling', unlocks: 3, readByThisRelease: false,
+    question: 'Is there a process for reviewing and retiring tests, and where is it written down?' },
+];
+
+const EVIDENCE_REASON = 'the value is set outside the repository (a queue-time variable, a workflow input or a matrix cell)';
+
+function byDimensionThenId(a, b) {
+  return a.dimension - b.dimension || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/** A pipeline path as a slug, so an id never carries raw repository text. */
+function slug(text) {
+  return String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'x';
+}
+
+/**
+ * One question per variable-valued filter that narrows a run. `--config` picks
+ * a config file and does not narrow, so its value is not a scope question.
+ * Two filters can slug alike (the same flag twice on a line, or paths such as
+ * `a/b.yml` and `a-b.yml`), so a repeat gets a numeric suffix.
+ */
+function runScopeQuestions(pipes) {
+  const questions = [];
+  const seen = new Map();
+
+  for (const p of pipes.items['D6.run-scope'].pipelines) {
+    for (const inv of p.invocations) {
+      for (const f of inv.filters) {
+        if (!f.variable || f.filtering === false) continue;
+
+        const base = `D6.run-scope.${slug(p.file)}.${inv.line}.${slug(f.flag)}`;
+        const n = (seen.get(base) ?? 0) + 1;
+        seen.set(base, n);
+
+        questions.push({
+          id: n === 1 ? base : `${base}-${n}`,
+          dimension: 6,
+          question: `What does \`${f.value}\` expand to in the pipeline \`${p.file}\`?`,
+          unlocks: null,
+          reason: EVIDENCE_REASON,
+          source: 'evidence',
+          readByThisRelease: false,
+        });
+      }
+    }
+  }
+  return questions;
+}
+
+/** A malformed table entry is a bug in this file; it must not become a silently missing question. */
+function checkTeamQuestionEntry(q) {
+  const where = `team question ${q.id}`;
+  if (q.source !== 'ceiling' && q.source !== 'cap') throw new Error(`${where}: unknown source "${q.source}"`);
+  if (typeof q.readByThisRelease !== 'boolean') throw new Error(`${where}: readByThisRelease must be a boolean`);
+  if (q.source === 'cap' && typeof q.threshold !== 'string') throw new Error(`${where}: a cap question names the threshold it removes`);
+}
+
+/**
+ * The level an answer could honestly make reachable: the rubric maximum for the
+ * question, held down by every constraint the answer would not remove.
+ */
+function honestUnlocks(q, d) {
+  const lifted = new Set([...(q.lifts ?? []), ...(q.source === 'cap' ? [q.threshold] : [])]);
+  const staying = d.constraints
+    .filter(c => !lifted.has(c.threshold) && Number.isInteger(c.capsAt))
+    .map(c => c.capsAt);
+  return Math.min(q.unlocks, ...staying);
+}
+
+function buildTeamQuestions(dimensions, pipes) {
+  const byN = new Map(dimensions.map(d => [d.dimension, d]));
+  const out = [];
+
+  for (const q of STATIC_TEAM_QUESTIONS) {
+    checkTeamQuestionEntry(q);
+
+    const d = byN.get(q.dimension);
+    if (!d) continue;
+
+    switch (q.source) {
+      case 'ceiling':
+        if (d.ceiling >= 3) continue;
+        break;
+      case 'cap':
+        if (!d.constraints.some(c => c.threshold === q.threshold)) continue;
+        break;
+    }
+    if (q.onlyWhenDeterminedAt !== undefined && d.determined !== q.onlyWhenDeterminedAt) continue;
+
+    const unlocks = honestUnlocks(q, d);
+    if (unlocks <= d.bounds.max) continue;
+
+    out.push({
+      id: q.id,
+      dimension: q.dimension,
+      question: q.question,
+      unlocks,
+      reason: q.reason ?? CEILING_REASON[q.dimension],
+      source: q.source,
+      readByThisRelease: q.readByThisRelease,
+    });
+  }
+
+  return [...out, ...runScopeQuestions(pipes)].sort(byDimensionThenId);
+}
 
 function pct(n) { return `${Math.round(n * 1000) / 10}%`; }
 function fmt(n)  { return Math.round(n * 1000) / 1000; }
@@ -285,6 +451,10 @@ function prepare(repoRoot) {
     determinedDimensions: dimensions.filter(d => d.determined !== null).length,
     openQuestions: dimensions.filter(d => d.determined === null).length,
     dimensions,
+    // Built from the bounds after the digest above, and kept outside `items`:
+    // derived data is not evidence, and rewording a question must not
+    // invalidate a verdict.
+    teamQuestions: buildTeamQuestions(dimensions, pipes),
     items: {
       source: source.items,
       rules: ruleItems,
@@ -310,6 +480,16 @@ function printHuman(r) {
     for (const c of d.constraints) {
       console.log(`       ${c.kind === 'calibration' ? 'calibrated' : 'literal   '}  ${c.observed}`);
       console.log(`                   -> ${c.effect}`);
+    }
+  }
+
+  if (r.teamQuestions.length) {
+    console.log('');
+    console.log('  Questions for the team (not for the judge to answer):');
+    // The question can quote a pipeline filter value from the audited repository.
+    for (const q of r.teamQuestions) {
+      const tag = q.readByThisRelease ? 'read by this release' : 'for the reader';
+      console.log(`    ${printable(q.id)} [${tag}]: ${printable(q.question)}`);
     }
   }
 }
@@ -339,4 +519,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { prepare, boundDimensions, DIMENSIONS, THRESHOLDS };
+module.exports = { prepare, boundDimensions, DIMENSIONS, THRESHOLDS, STATIC_TEAM_QUESTIONS };
