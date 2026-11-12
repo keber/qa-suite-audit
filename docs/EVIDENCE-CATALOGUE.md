@@ -254,11 +254,12 @@ exists to prevent.
 |---|---|---|
 | `D7.selector-mix` | semantic (`getByRole`, `getByLabel`, `getByTestId`) vs raw string locators | regex, reported as a ratio |
 | `D7.file-size` | lines and test count per file | count |
+| `D7.page-object-usage` | share of tests built on a layer (page object, fixture, helper) vs tests that call `page.`/`request.` inline; layer files by kind; `test.extend` declarations | inferential: one-level import graph over masked source. Layer files are relative imports of suite test files that resolve to a repository file (`.ts .js .mjs .cjs .tsx`, `/index.*`) and are not tests; kind is `pageObject` (class taking or storing `page`, or a page/screen/component-named class), `fixture` (`.extend(` on `test`/`base`) or `helper`. A test is layered when it calls an imported layer symbol, an instance of one, a destructured custom fixture, or an assertion proxy. Blind spots: tsconfig path aliases (`@pages/...`) and baseUrl imports are not resolved and are counted in `layers.unresolvedImports`, as are relative imports that resolve to nothing or into `node_modules`/build output; only direct imports of test files are followed; quoted fixture keys and data-only fixtures are missed. Read `unresolvedImports` before trusting the share. |
 
-**Discriminates:** 0 vs 1 vs 2 from `D7.selector-mix` and `D7.file-size`. The
-rubric also weighs duplication and page-object layering; neither is extracted
-yet (`D7.duplication`, and `D7.page-object-usage` in issue #7), so they are not
-enforced.
+**Discriminates:** 0 vs 1 vs 2 from `D7.selector-mix` and `D7.file-size`.
+`D7.page-object-usage` is evidence for the judge, with no threshold and no
+bound attached. The rubric also weighs duplication; it is not extracted yet
+(`D7.duplication`), so it is not enforced.
 
 **Not scored, declared unreachable:** 3, unless the repository carries explicit
 review and retirement process evidence (CODEOWNERS covering the suite, a
@@ -284,7 +285,6 @@ that makes the extractor emit it.
 | `D4.title-quality` | test titles that name a behavior vs a mechanism | a classification of meaning, which is judgment and belongs to the agent, not a script |
 | `D7.dead-markers` | long-lived `skip`, `fixme`, `BLOCKED` or `TODO` annotations | "long-lived" needs commit history, which v1 does not read |
 | `D7.duplication` | repeated statement sequences across test files | normalized token-window comparison not written |
-| `D7.page-object-usage` | whether interaction is layered or inline in tests | import graph of test files not written; scheduled in issue #7 |
 | `D7.title-vocabulary` | titles naming implementation (button, click, modal) vs domain terms | a classification of meaning, which is judgment and belongs to the agent |
 
 ---
