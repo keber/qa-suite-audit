@@ -1,0 +1,35 @@
+{
+  "name": "@keber/qa-suite-audit",
+  "version": "0.1.0",
+  "description": "Repeatable, evidence-first audit of an automated test suite. Scripts produce evidence; an agent assigns rubric levels citing that evidence; a validator checks the verdict.",
+  "keywords": [
+    "qa",
+    "testing",
+    "audit",
+    "rubric",
+    "playwright",
+    "test-quality",
+    "allure"
+  ],
+  "license": "MIT",
+  "main": "src/judge-prep.js",
+  "bin": {
+    "qa-suite-audit": "bin/qa-suite-audit.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "docs/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/keber/qa-suite-audit.git"
+  }
+}

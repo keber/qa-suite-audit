@@ -1,0 +1,304 @@
+/**
+ * judge-prep.test.js - Tests for the judgment bounding step.
+ *
+ * This is where the instrument stops being deterministic, so these tests guard
+ * the seam: that thresholds are declared rather than hidden, that a bound the
+ * evidence settles is never handed to an agent, and that a level nobody can
+ * witness is never offered as reachable.
+ */
+
+'use strict';
+
+const { test } = require('node:test');
+const assert   = require('node:assert/strict');
+const fs       = require('node:fs');
+const os       = require('node:os');
+const path     = require('node:path');
+
+const { prepare, DIMENSIONS, THRESHOLDS } = require('../src/judge-prep.js');
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeRepo(t, tree) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'judge-prep-'));
+  for (const [rel, contents] of Object.entries(tree)) {
+    const full = path.join(root, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, contents, 'utf8');
+  }
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+const CONFIG = [
+  "import { defineConfig } from '@playwright/test';",
+  'export default defineConfig({',
+  "  testDir: './tests',",
+  "  use: { trace: 'retain-on-failure' },",
+  '});',
+].join('\n');
+
+const SPEC_BASE = 'qa/01-specifications/module-ADM/submodule-CON';
+
+const RULES_MD = [
+  '# Reglas',
+  '## RN-ADM-CON-001 -- Acceso',
+  'Texto.',
+  '## RN-ADM-CON-002 -- Cuenta',
+  'Texto.',
+].join('\n');
+
+const SCENARIOS_MD = [
+  '# Escenarios',
+  '| ID | Titulo | Notas |',
+  '|---|---|---|',
+  '| TC-CON-001 | Acceso | RN-ADM-CON-001 |',
+  '| TC-CON-002 | Cuenta | RN-ADM-CON-002 |',
+].join('\n');
+
+const PIPELINE = [
+  'trigger:',
+  '  branches:',
+  '    include:',
+  '      - master',
+  'pool:',
+  "  vmImage: 'ubuntu-latest'",
+  'steps:',
+  '  - script: npx playwright test',
+  "    workingDirectory: 'tests'",
+].join('\n');
+
+/** Build a spec file of `total` tests, `assertless` of which have no check. */
+function specFile(total, assertless, extra = '') {
+  const lines = ["import { test, expect } from '@playwright/test';"];
+  for (let i = 1; i <= total; i++) {
+    const id = `TC-CON-${String(i).padStart(3, '0')}`;
+    const body = i <= assertless
+      ? `await page.goto('/');`
+      : `await expect(page.locator('#total')).toHaveText('42');`;
+    lines.push(`test('[${id}] case ${i}', async ({ page }) => { ${body} ${extra} });`);
+  }
+  return lines.join('\n');
+}
+
+function dim(result, n) {
+  return result.dimensions.find(d => d.dimension === n);
+}
+
+const FULL_REPO = (spec, pipeline = PIPELINE) => ({
+  'playwright.config.ts': CONFIG,
+  'tests/con.spec.ts': spec,
+  [`${SPEC_BASE}/01-business-rules.md`]: RULES_MD,
+  [`${SPEC_BASE}/05-test-scenarios.md`]: SCENARIOS_MD,
+  'qa/pipelines/ci.yml': pipeline,
+});
+
+// ---------------------------------------------------------------------------
+// Thresholds are declared, not hidden
+// ---------------------------------------------------------------------------
+
+test('every threshold records what it interprets and what it costs to disagree', (t) => {
+  assert.ok(THRESHOLDS.thresholds.length > 0);
+
+  for (const th of THRESHOLDS.thresholds) {
+    assert.ok(th.id, 'threshold needs an id');
+    assert.ok(th.rubricText, `${th.id} must quote the rubric text it interprets`);
+    assert.ok(['literal', 'calibration'].includes(th.kind), `${th.id} must say whether it is a reading or a choice`);
+    assert.ok(th.rationale && th.rationale.length > 40, `${th.id} needs a rationale someone can argue with`);
+    assert.ok(th.disagreementCost, `${th.id} must state what moving it costs`);
+  }
+});
+
+test('the source verdict bands are explicitly not applied', (t) => {
+  // They were calibrated for complete evidence. v1 reads only the repository.
+  assert.equal(THRESHOLDS.verdictBands.applySourceBands, false);
+});
+
+// ---------------------------------------------------------------------------
+// Ceilings
+// ---------------------------------------------------------------------------
+
+test('v1 is attainable at 16, not 21', (t) => {
+  const total = DIMENSIONS.reduce((n, d) => n + d.ceiling, 0);
+  assert.equal(total, 16);
+});
+
+test('a repository with a rule inventory keeps the 16 point ceiling', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  assert.equal(prepare(root).attainable, 16);
+});
+
+test('a repository with no rule inventory drops to 13', (t) => {
+  const root = makeRepo(t, {
+    'playwright.config.ts': CONFIG,
+    'tests/con.spec.ts': specFile(10, 0),
+    'qa/pipelines/ci.yml': PIPELINE,
+  });
+
+  const r = prepare(root);
+  assert.equal(r.attainable, 13);
+  assert.equal(dim(r, 1).ceiling, 1);
+  assert.equal(dim(r, 5).ceiling, 1);
+});
+
+test('every dimension states why its ceiling is where it is', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  for (const d of prepare(root).dimensions) {
+    assert.ok(d.ceilingReason && d.ceilingReason.length > 10, `D${d.dimension} needs a ceiling reason`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Caps from evidence
+// ---------------------------------------------------------------------------
+
+test('an isolated assertless test does not cap sensitivity', (t) => {
+  // 1 in 100 is a finding to fix, not a characteristic of the suite. The test
+  // is still reported individually by file and line.
+  const root = makeRepo(t, FULL_REPO(specFile(100, 1)));
+  const r = prepare(root);
+
+  assert.equal(dim(r, 2).bounds.max, 3, 'sensitivity stays open');
+  assert.equal(r.items.source['D2.assertless-tests'].count, 1, 'but the test is still named');
+});
+
+test('systemically assertless tests cap sensitivity at zero', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(100, 10)));
+  const d2 = dim(prepare(root), 2);
+
+  assert.equal(d2.determined, 0);
+  assert.equal(d2.eliminatory, true);
+  assert.equal(d2.constraints[0].kind, 'calibration',
+    'the reader must see that a choice, not the rubric, drew this line');
+});
+
+test('waiting as the synchronization strategy caps determinism', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0, 'await page.waitForTimeout(1000); await page.waitForTimeout(500);')));
+  assert.equal(dim(prepare(root), 3).bounds.max, 1);
+});
+
+test('occasional fixed waits do not cap determinism', (t) => {
+  const spec = specFile(10, 0).replace(
+    "test('[TC-CON-001] case 1', async ({ page }) => {",
+    "test('[TC-CON-001] case 1', async ({ page }) => { await page.waitForTimeout(500);"
+  );
+  const root = makeRepo(t, FULL_REPO(spec));
+  assert.equal(dim(prepare(root), 3).bounds.max, 2);
+});
+
+test('no failure artifact caps diagnosis at level 1', (t) => {
+  const bare = CONFIG.replace("  use: { trace: 'retain-on-failure' },", '');
+  const root = makeRepo(t, { ...FULL_REPO(specFile(10, 0)), 'playwright.config.ts': bare });
+  assert.equal(dim(prepare(root), 4).bounds.max, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The one floor
+// ---------------------------------------------------------------------------
+
+test('a pipeline that runs the suite determines CI at level 1', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  const d6 = dim(prepare(root), 6);
+
+  assert.equal(d6.determined, 1);
+  assert.equal(d6.question, null, 'a settled dimension is never asked about');
+});
+
+test('no pipeline running the suite determines CI at level 0', (t) => {
+  const tree = FULL_REPO(specFile(10, 0));
+  delete tree['qa/pipelines/ci.yml'];
+  const root = makeRepo(t, tree);
+
+  assert.equal(dim(prepare(root), 6).determined, 0);
+});
+
+// ---------------------------------------------------------------------------
+// The judgment surface
+// ---------------------------------------------------------------------------
+
+test('an open dimension carries a question and the items its answer must cite', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+
+  for (const d of prepare(root).dimensions) {
+    if (d.determined !== null) {
+      assert.equal(d.question, null, `D${d.dimension} is settled and must not be asked`);
+      continue;
+    }
+    assert.ok(d.question && d.question.length > 30, `D${d.dimension} needs an answerable question`);
+    assert.ok(d.mustCite.length > 0, `D${d.dimension} must name the items its answer cites`);
+  }
+});
+
+test('every citable item named by a dimension exists in the evidence', (t) => {
+  // A typo here would let a level cite an item that does not exist, and the
+  // citation requirement would quietly stop meaning anything.
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  const r = prepare(root);
+  const available = new Set([
+    ...Object.keys(r.items.source),
+    ...Object.keys(r.items.rules),
+    ...Object.keys(r.items.pipelines),
+  ]);
+
+  for (const d of r.dimensions) {
+    for (const item of d.mustCite) {
+      assert.ok(available.has(item), `D${d.dimension} cites unknown item ${item}`);
+    }
+  }
+});
+
+test('bounds never exceed the dimension ceiling', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  for (const d of prepare(root).dimensions) {
+    assert.ok(d.bounds.max <= d.ceiling, `D${d.dimension} offers a level above its ceiling`);
+    assert.ok(d.bounds.min <= d.bounds.max, `D${d.dimension} has inverted bounds`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Binding the verdict to the evidence
+// ---------------------------------------------------------------------------
+
+test('the same repository yields the same digest', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  assert.equal(prepare(root).evidenceDigest, prepare(root).evidenceDigest);
+});
+
+test('changing the suite changes the digest', (t) => {
+  // A verdict is bound to a digest. If the evidence moves, the verdict is stale
+  // rather than silently reused.
+  const a = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  const b = makeRepo(t, FULL_REPO(specFile(11, 0)));
+  assert.notEqual(prepare(a).evidenceDigest, prepare(b).evidenceDigest);
+});
+
+test('the preparation assigns no level it was not forced to', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  const r = prepare(root);
+
+  const settled = r.dimensions.filter(d => d.determined !== null);
+  for (const d of settled) {
+    assert.ok(d.constraints.length > 0, `D${d.dimension} was settled without stating why`);
+  }
+});
+
+test('a suite that queries nothing is not capped for selector fragility', (t) => {
+  // Absent evidence is not bad evidence. A suite with zero selectors of any
+  // kind has no selector mix, and a share computed from zero must not decide
+  // a level. Found against two repositories whose whole suite is one API test.
+  const apiOnly = [
+    "import { test, expect } from '@playwright/test';",
+    "test('[TC-API-001] health returns 200', async ({ request }) => {",
+    "  const response = await request.get('/health');",
+    '  expect(response.status()).toBe(200);',
+    '});',
+  ].join('\n');
+
+  const root = makeRepo(t, FULL_REPO(apiOnly));
+  const r = prepare(root);
+
+  assert.equal(r.items.source['D7.selector-mix'].semanticShare, null, 'no selectors were observed');
+  assert.equal(dim(r, 7).bounds.max, 2, 'so maintainability stays open');
+});

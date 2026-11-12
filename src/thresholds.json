@@ -1,0 +1,82 @@
+{
+  "schema": "audit-thresholds/v1",
+  "note": "Every interpretive decision the instrument makes, in one place. The source rubric states level descriptions in prose; turning prose into a boundary is a choice, and a choice nobody can see is a choice nobody can argue with. Each entry records the rubric text it interprets, the rule applied, and whether the rule is a literal reading or a calibration. Change a value here and every audit changes with it, visibly.",
+
+  "thresholds": [
+    {
+      "id": "D2.systemic-assertless",
+      "dimension": 2,
+      "rubricText": "Hay tests que no pueden fallar: sin assert, o asertan que la pagina cargo. Verde permanente.",
+      "kind": "calibration",
+      "rule": "level 0 applies when tests that cannot fail are a CHARACTERISTIC of the suite, not an isolated defect",
+      "value": { "assertlessShare": 0.05, "weakOnlyShare": 0.25 },
+      "rationale": "A strictly literal reading drops a 515-test suite to level 0 for five bad tests, on an eliminatory dimension. That reading makes the instrument useless and does not match the level text, which describes 'verde permanente' as the suite's condition. One in twenty tests unable to fail is systemic; one in a hundred is a finding to fix. Individual assertless tests are ALWAYS reported by file and line regardless of this threshold.",
+      "disagreementCost": "raising it hides weak suites; lowering it fails suites for isolated defects"
+    },
+    {
+      "id": "D3.waiting-as-strategy",
+      "dimension": 3,
+      "rubricText": "Falla significa que hay un bug. Sin esperas fijas, sin dependencia de orden ni de estado compartido.",
+      "kind": "calibration",
+      "rule": "at or above this many fixed waits per test, waiting is the synchronization strategy and the dimension cannot exceed level 1",
+      "value": { "fixedWaitsPerTest": 1.0 },
+      "rationale": "One fixed wait per test on average means the suite synchronizes by sleeping. Below that, fixed waits look like local workarounds. Zero fixed waits is required by the level 3 text, which is out of reach in v1 anyway.",
+      "disagreementCost": "too high tolerates sleep-driven suites; too low punishes a handful of legitimate waits"
+    },
+    {
+      "id": "D1.traceability-floor",
+      "dimension": 1,
+      "rubricText": "Cada valor esperado es trazable a una regla de negocio.",
+      "kind": "literal",
+      "rule": "with no rule coverage at all, the oracle cannot be shown to come from the specification, so the dimension cannot exceed level 1",
+      "value": { "coveredRulesRatio": 0.0 },
+      "rationale": "Directly from the level text: levels 2 and 3 both require expected values to originate in the specification. With zero rules linked to automated cases nothing supports that claim.",
+      "disagreementCost": "none; this is the level text restated"
+    },
+    {
+      "id": "D5.coverage-floor",
+      "dimension": 5,
+      "rubricText": "Puedes listar que reglas cubre la suite y cuales quedan fuera a proposito.",
+      "kind": "literal",
+      "rule": "level 3 additionally requires the deliberate exclusions to be written down somewhere in the repository",
+      "value": { "requiresExclusionStatement": true },
+      "rationale": "The level text has two halves. Listing what is covered is computable from the catalogue; listing what is excluded ON PURPOSE is a statement of intent that only a person writes. v1 extracts no such statement, so D5 is capped at 2 until one exists.",
+      "disagreementCost": "none while no exclusion document is extracted; revisit if one is added"
+    },
+    {
+      "id": "D6.runs-the-suite",
+      "dimension": 6,
+      "rubricText": "Corre en la maquina de alguien, cuando se acuerda. / Corre en CI, pero no bloquea nada.",
+      "kind": "literal",
+      "rule": "level 1 requires a pipeline that both invokes the runner and points at the resolved suite; otherwise level 0",
+      "value": { "pipelinesRunningTheSuite": 1 },
+      "rationale": "A pipeline that exists but never runs this suite is not this suite running in CI. Levels 2 and 3 are unreachable in v1 by declared ceiling.",
+      "disagreementCost": "none; the alternative is crediting CI for a pipeline that does something else"
+    },
+    {
+      "id": "D7.selector-fragility",
+      "dimension": 7,
+      "rubricText": "Copy-paste, nombres genericos, selectores fragiles.",
+      "kind": "calibration",
+      "rule": "below this share of semantic selectors, the suite is coupled to markup and the dimension cannot exceed level 1",
+      "value": { "semanticSelectorShare": 0.1 },
+      "rationale": "Under one in ten selectors being role, label or test id based, the suite addresses the DOM rather than the interface. Above it, selector choice stops being the dominant maintainability signal and naming and duplication take over, which are judgment calls.",
+      "disagreementCost": "too high punishes suites whose app cannot be queried semantically; too low tolerates markup coupling"
+    },
+    {
+      "id": "D4.artifacts-present",
+      "dimension": 4,
+      "rubricText": "Hay trace, screenshot o payload, y el nombre del test dice que comportamiento se rompio.",
+      "kind": "literal",
+      "rule": "level 2 requires at least one failure artifact configured; with none the dimension cannot exceed level 1",
+      "value": { "requiresAnyArtifact": true },
+      "rationale": "Restates the level text. Whether the NAME says what broke is the judgment half and stays with the agent.",
+      "disagreementCost": "none"
+    }
+  ],
+
+  "verdictBands": {
+    "note": "The source rubric's bands (0-9, 10-14, 15-18, 19-21) were calibrated for complete evidence. v1 reads only the repository, so they are not applied. A v1 result is reported as obtained over attainable, with the per-dimension ceilings shown.",
+    "applySourceBands": false
+  }
+}
