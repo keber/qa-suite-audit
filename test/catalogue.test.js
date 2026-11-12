@@ -123,6 +123,14 @@ test('D7.page-object-usage is documented as extracted, not as a gap', () => {
   assert.ok(!notExtracted.includes('D7.page-object-usage'));
 });
 
+test('D6.run-scope is both documented and emitted, so the guardian covers it', (t) => {
+  const { extracted } = parseCatalogue();
+  const input = prepare(makeRepo(t, FIXTURE));
+
+  assert.ok(extracted.includes('D6.run-scope'), 'add a D6.run-scope row to the D6 table');
+  assert.ok('D6.run-scope' in input.items.pipelines, 'the extractor must emit D6.run-scope');
+});
+
 test('a not-extracted item is never emitted', (t) => {
   const { notExtracted } = parseCatalogue();
   const input = prepare(makeRepo(t, FIXTURE));

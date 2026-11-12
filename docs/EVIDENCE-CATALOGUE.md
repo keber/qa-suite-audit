@@ -234,6 +234,7 @@ oversight. The repository rarely says.
 | `D6.pipeline-present` | pipeline or workflow definitions that run the suite | scan `.github/workflows`, `azure-pipelines*.yml`, `**/pipelines/*.yml` |
 | `D6.pipeline-triggers` | declared triggers: push, PR, schedule, manual | parse trigger blocks |
 | `D6.suite-invocation` | the pipeline actually invokes the resolved suite | match run steps against suite paths |
+| `D6.run-scope` | per running pipeline, each runner invocation with its raw line and the filters it passes (`--grep`, `--grep-invert`, `--project`, `--shard`, `--tag`, `--last-failed`, `--only-changed`, positional paths): `full` only when none is present. `--config` is recorded with `filtering: false`. Evidence for the judge and the report; it feeds no threshold. A filter whose value is a pipeline variable (`$(VAR)`, `${{ ... }}`, `$VAR`) is kept raw and marked `variable: true`: the effective scope is then unknowable from the repository | read run steps, folded and multi-line blocks and continuations; follow `npm`/`yarn`/`pnpm` scripts of the nearest package.json one level (`via: 'package-script'`) |
 | `D6.result-publication` | test results published as a CI artifact | parse publish steps |
 | `D6.declared-gating` | any in-repo claim of gating, such as a branch policy file | scan, flagged as declaration not enforcement |
 
