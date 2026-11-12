@@ -40,6 +40,7 @@ const { extractEvidence }   = require('./extract-source.js');
 const { selectAdapter }     = require('./adapters/index.js');
 const { buildItems }        = require('./traceability.js');
 const { extractPipelines }  = require('./extract-pipelines.js');
+const { extractMutationConfig } = require('./extract-mutation.js');
 
 const THRESHOLDS = JSON.parse(fs.readFileSync(path.join(__dirname, 'thresholds.json'), 'utf8'));
 
@@ -59,7 +60,7 @@ const DIMENSIONS = [
 
 const CEILING_REASON = {
   1: 'reachable only where a rule inventory exists in the repository',
-  2: 'level 3 needs mutation evidence committed to the repository',
+  2: 'level 3 needs measured sensitivity: mutation config in the repository (capped at 2 without it) or a rule broken on purpose, which v1 cannot read',
   3: 'level 3 asserts behavior across runs, which the repository cannot witness',
   4: 'no structural limit in v1',
   5: 'level 3 needs the deliberate exclusions written down; v1 extracts no such statement',
@@ -88,6 +89,7 @@ function boundDimensions(source, ruleItems, pipes) {
   const activeTests  = si['D2.assertless-tests'].of;
   const assertShare  = activeTests ? si['D2.assertless-tests'].count / activeTests : 0;
   const weakShare    = activeTests ? si['D2.weak-assertions'].weakOnlyTests / activeTests : 0;
+  const mutationConfigs = si['D2.mutation-config'].count;
   const waitsPerTest = si['D3.fixed-waits'].perTest ?? 0;
   const semanticShare = si['D7.selector-mix'].semanticShare ?? 0;
   const runningPipes = pi['D6.suite-invocation'].pipelinesRunningTheSuite;
@@ -121,6 +123,17 @@ function boundDimensions(source, ruleItems, pipes) {
         constraints.push(note(t.id,
           `assertless ${pct(assertShare)} (limit ${pct(t.value.assertlessShare)}), rendering-only ${pct(weakShare)} (limit ${pct(t.value.weakOnlyShare)})`,
           'capped at 0 - tests that cannot fail are a characteristic of this suite'));
+      }
+
+      // Both caps are recorded when both apply, and the lower one decides: the
+      // 0 cap above must never be raised by this one. Config present only lifts
+      // the cap. It does not prove the tool runs, so nothing here floors D2.
+      const m = threshold('D2.sensitivity-measured');
+      if (mutationConfigs <= m.value.mutationConfigCount) {
+        cap = Math.min(cap, 2);
+        constraints.push(note(m.id,
+          'no mutation testing configuration found in the repository',
+          'capped at 2 - level 3 needs measured sensitivity; a rule broken on purpose leaves no trace v1 reads'));
       }
     }
 
@@ -194,7 +207,7 @@ function note(thresholdId, observed, effect) {
 /** Items an assigned level must cite. A level citing nothing else is invalid. */
 const MUST_CITE = {
   1: ['D1.tc-id-coverage', 'D1.ext-id-coverage', 'D1.spec-linkage', 'D5.covered-rules', 'D1.risk-inventory'],
-  2: ['D2.assertless-tests', 'D2.indirect-assertions', 'D2.weak-assertions', 'D2.skipped-tests', 'D2.expected-failures'],
+  2: ['D2.assertless-tests', 'D2.indirect-assertions', 'D2.weak-assertions', 'D2.skipped-tests', 'D2.expected-failures', 'D2.mutation-config'],
   3: ['D3.fixed-waits', 'D3.conditional-waits'],
   4: ['D4.failure-context'],
   5: ['D5.rule-catalogue', 'D5.covered-rules', 'D5.uncovered-rules', 'D5.orphan-tests', 'D5.risk-coverage'],
@@ -225,10 +238,14 @@ function prepare(repoRoot) {
   // which the source extractor needs before it reads a single file.
   const adapter  = selectAdapter(repoRoot);
   const boundary = resolveSuite(repoRoot);
-  const source   = extractEvidence(repoRoot, {
+  const extracted = extractEvidence(repoRoot, {
     caseIdPattern:  adapter.caseIdPattern,
     riskRefScanner: adapter.riskRefScanner,
   });
+  // Mutation tooling is a repository-level fact, not a property of any one
+  // suite, so it is read from the repository root and joins the source items
+  // here, before the digest, rather than inside the per-suite extractor.
+  const source = { ...extracted, items: { ...extracted.items, ...extractMutationConfig(repoRoot) } };
   const specs    = adapter.extract(repoRoot);
   const pipes    = extractPipelines(repoRoot);
 

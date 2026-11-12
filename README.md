@@ -83,6 +83,7 @@ than publishing nothing.
 | `src/resolve-suite.js` | which files are the suite, and by which rule each was decided |
 | `src/extract-source.js` | per-test evidence: assertions, waits, selectors, skips |
 | `src/extract-pipelines.js` | CI definitions, identified by content rather than by path |
+| `src/extract-mutation.js` | mutation testing tooling (Stryker, mutmut, PIT, infection), identified by content and config names |
 | `src/adapters/` | **the only methodology-specific code**: how rules and cases are written down |
 | `src/traceability.js` | the rule-to-test join, identical for every adapter |
 | `src/judge-prep.js` | applies the thresholds and bounds what is left to judge |

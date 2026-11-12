@@ -543,4 +543,7 @@ module.exports = {
   findTopLevelValue,
   readPatternOption,
   DEFAULT_TEST_MATCH,
+  PRUNED_DIRS,
+  walk,
+  relative,
 };

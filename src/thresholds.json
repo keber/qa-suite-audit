@@ -24,6 +24,18 @@
       "disagreementCost": "raising it hides weak suites; lowering it fails suites for isolated defects"
     },
     {
+      "id": "D2.sensitivity-measured",
+      "dimension": 2,
+      "rubricText": "Se probó rompiendo la regla a propósito, o hay mutation testing corriendo. La sensibilidad está medida.",
+      "kind": "calibration",
+      "rule": "with no mutation testing configuration in the repository (D2.mutation-config empty), the dimension cannot exceed level 2; a config lifts the cap but never sets a floor",
+      "value": {
+        "mutationConfigCount": 0
+      },
+      "rationale": "The level 3 text is a disjunction. Mutation config is repository evidence for one half. The other half, a rule broken on purpose to watch the test fail, leaves no trace v1 can read, so this cap can wrongly hold back a suite that was verified that way. It is a calibration for that reason: absent config is treated as absent measurement because nothing readable says otherwise. Present config does not prove mutation testing is 'corriendo' either, so the cap is lifted by the config but level 3 still has to be argued by the judge from the mutation evidence; it is never floored.",
+      "disagreementCost": "keeping the cap holds back suites verified by hand-broken rules, which v1 cannot see; dropping it lets level 3 stand with no readable evidence of measured sensitivity"
+    },
+    {
       "id": "D3.waiting-as-strategy",
       "dimension": 3,
       "rubricText": "Falla significa que hay un bug. Sin esperas fijas, sin dependencia de orden ni de estado compartido.",
