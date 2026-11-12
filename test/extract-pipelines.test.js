@@ -197,6 +197,113 @@ test('a pipeline that never invokes the runner does not run the suite', (t) => {
     'being a pipeline is not the same as running the suite');
 });
 
+test('suite-invocation and run-scope agree on script-driven runs', (t) => {
+  // One invocation finder serves both items, so they cannot diverge.
+  const pkg = JSON.stringify({ scripts: { e2e: 'playwright test --grep @smoke', unit: 'jest' } });
+  const items = extractPipelines(makeRepo(t, {
+    'playwright.config.ts': PW_CONFIG,
+    'tests/a.spec.ts': SPEC,
+    'package.json': pkg,
+    'run.yml': azureSteps(['  - script: yarn e2e']),
+    'other.yml': azureSteps(['  - script: pnpm run unit']),
+  })).items;
+
+  assert.deepEqual(items['D6.suite-invocation'].files, ['run.yml']);
+  assert.deepEqual(items['D6.run-scope'].pipelines.map(p => p.file), ['run.yml']);
+});
+
+test('a runner call named only in a display name or echo does not count as running the suite', (t) => {
+  const yaml = azureSteps(['  - script: echo "npm test"', '    displayName: npm run test:smoke']);
+  const items = extractPipelines(makeRepo(t, {
+    'playwright.config.ts': PW_CONFIG,
+    'tests/a.spec.ts': SPEC,
+    'ci.yml': yaml,
+  })).items;
+
+  assert.equal(items['D6.suite-invocation'].pipelinesRunningTheSuite, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Command forms the old text match accepted and the finder must still read
+// ---------------------------------------------------------------------------
+
+/** Repo with the suite under e2e/, as GitLab projects often keep it. */
+function nestedSuite(t, tree) {
+  return makeRepo(t, {
+    'e2e/playwright.config.ts': PW_CONFIG,
+    'e2e/tests/a.spec.ts': SPEC,
+    ...tree,
+  });
+}
+
+const GITLAB_STAGES = ['stages: [test]', 'e2e:', '  stage: test'];
+
+test('a gitlab script list is read as command lines', (t) => {
+  const yaml = [...GITLAB_STAGES, '  script:', '    - cd e2e', '    - npx playwright test'].join('\n');
+  const items = extractPipelines(nestedSuite(t, { '.gitlab-ci.yml': yaml })).items;
+
+  assert.equal(items['D6.suite-invocation'].pipelinesRunningTheSuite, 1);
+  assert.deepEqual(items['D6.suite-invocation'].files, ['.gitlab-ci.yml']);
+  assert.equal(items['D6.run-scope'].pipelines[0].invocations[0].raw, 'npx playwright test');
+});
+
+test('before_script and after_script lists are command lines too', (t) => {
+  for (const key of ['before_script', 'after_script']) {
+    const yaml = ['stages: [test]', 'e2e:', '  stage: test', `  ${key}:`, '    - npx playwright test', '  script:', '    - echo done'].join('\n');
+    const items = extractPipelines(nestedSuite(t, { '.gitlab-ci.yml': yaml })).items;
+    assert.equal(items['D6.suite-invocation'].pipelinesRunningTheSuite, 1, key);
+  }
+});
+
+test('list items may be quoted, folded or literal blocks, and the list may sit at the key column', (t) => {
+  const forms = {
+    quoted:   ['  script:', '    - "npx playwright test --grep @a"'],
+    single:   ["  script:", "    - 'npx playwright test'"],
+    folded:   ['  script:', '    - >', '      npx playwright test', '      --grep @a'],
+    literal:  ['  script:', '    - |', '      npm ci', '      npx playwright test'],
+    sameCol:  ['  script:', '  - npx playwright test'],
+    comment:  ['  script:', '    # run it', '    - npx playwright test'],
+    flow:     ['  script: ["npm ci", "npx playwright test --grep a,b"]'],
+  };
+  for (const [name, body] of Object.entries(forms)) {
+    const yaml = [...GITLAB_STAGES, ...body].join('\n');
+    const items = extractPipelines(nestedSuite(t, { '.gitlab-ci.yml': yaml })).items;
+    assert.equal(items['D6.suite-invocation'].pipelinesRunningTheSuite, 1, name);
+  }
+});
+
+test('a command list stops where the list ends', (t) => {
+  const yaml = [...GITLAB_STAGES, '  script:', '    - echo hi', '  tags:', '    - npx playwright test'].join('\n');
+  const items = extractPipelines(nestedSuite(t, { '.gitlab-ci.yml': yaml })).items;
+
+  assert.equal(items['D6.suite-invocation'].pipelinesRunningTheSuite, 0, 'tags is not a command key');
+});
+
+test('other command forms the old match accepted are still read', (t) => {
+  const forms = {
+    adoBash:       azureSteps(['  - bash: npx playwright test']),
+    adoPwsh:       azureSteps(['  - pwsh: npx playwright test']),
+    adoPowershell: azureSteps(['  - powershell: |', '      npx playwright test']),
+    adoCmdLine:    azureSteps(['  - task: CmdLine@2', '    inputs:', '      script: npx playwright test']),
+    ghSingle:      ghWorkflow(['      - run: npx playwright test']),
+    ghBlock:       ghWorkflow(['      - run: |', '          npm ci', '          npx playwright test']),
+    ghQuoted:      ghWorkflow(["      - run: 'npm test'"]),
+    commandList:   ['stages: [x]', 'job:', '  command:', '    - npx playwright test'].join('\n'),
+    circleRun:     ['version: 2.1', 'jobs:', '  e2e:', '    steps:', '      - run:', '          command: npx playwright test', 'stages: [x]'].join('\n'),
+    shellWrapper:  ghWorkflow(['      - run: bash -c "cd e2e && npx playwright test"']),
+    xvfb:          ghWorkflow(['      - run: xvfb-run -a npx playwright test']),
+    yarnDirect:    ghWorkflow(['      - run: yarn playwright test']),
+    pnpmExec:      ghWorkflow(['      - run: pnpm exec playwright test']),
+  };
+  for (const [name, yaml] of Object.entries(forms)) {
+    const root = makeRepo(t, {
+      'playwright.config.ts': PW_CONFIG, 'tests/a.spec.ts': SPEC, 'ci.yml': yaml,
+      'package.json': JSON.stringify({ scripts: {} }),
+    });
+    assert.equal(extractPipelines(root).items['D6.suite-invocation'].pipelinesRunningTheSuite, 1, name);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Ceiling and contract
 // ---------------------------------------------------------------------------
@@ -441,14 +548,19 @@ test('a script that calls another script is not followed past one level', (t) =>
   const pkg = JSON.stringify({ scripts: { 'test:e2e': 'npm run inner', inner: 'playwright test --grep @x' } });
   const { pipelines } = scopeOf(t, { 'package.json': pkg, 'ci.yml': ghWorkflow(['      - run: npm run test:e2e']) });
 
-  assert.deepEqual(pipelines[0].invocations, []);
+  // No invocation is found, so the pipeline is not one that runs the suite and
+  // run-scope lists nothing for it (it used to be listed with no invocations,
+  // when any `npm run test...` text counted).
+  assert.deepEqual(pipelines, []);
 });
 
 test('a script that does not run the playwright runner records nothing', (t) => {
   const pkg = JSON.stringify({ scripts: { test: 'jest' } });
   const { pipelines } = scopeOf(t, { 'package.json': pkg, 'ci.yml': ghWorkflow(['      - run: npm test']) });
 
-  assert.deepEqual(pipelines[0].invocations, []);
+  // A script that resolves to jest is not the suite, so the pipeline does not
+  // count as running it at all (this encoded the bug of counting any npm test).
+  assert.deepEqual(pipelines, []);
 });
 
 test('the package.json nearest the working directory wins over the root one', (t) => {

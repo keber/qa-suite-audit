@@ -270,6 +270,75 @@ test('no pipeline running the suite determines CI at level 0', (t) => {
   assert.equal(dim(prepare(root), 6).determined, 0);
 });
 
+/** A pipeline whose only run step is `run`, in a repo with the given package.json scripts. */
+function ciRunning(run, scripts) {
+  const pipeline = ['trigger:', '  branches:', '    include:', '      - master',
+    'steps:', `  - script: ${run}`].join('\n');
+  const tree = FULL_REPO(specFile(10, 0), pipeline);
+  if (scripts) tree['package.json'] = JSON.stringify({ scripts });
+  return tree;
+}
+
+test('a suite run through `npm run e2e` determines CI at level 1', (t) => {
+  // D6 is settled by evidence, so a missed invocation is a settled, wrong 0.
+  const root = makeRepo(t, ciRunning('npm run e2e', { e2e: 'playwright test' }));
+  assert.equal(dim(prepare(root), 6).determined, 1);
+});
+
+test('yarn and pnpm script invocations determine CI at level 1', (t) => {
+  for (const run of ['yarn e2e', 'yarn run e2e', 'pnpm e2e', 'pnpm run e2e']) {
+    const root = makeRepo(t, ciRunning(run, { e2e: 'npx playwright test --project=chromium' }));
+    assert.equal(dim(prepare(root), 6).determined, 1, run);
+  }
+});
+
+test('yarn test and pnpm test resolve through the test script', (t) => {
+  for (const run of ['yarn test', 'pnpm test']) {
+    const root = makeRepo(t, ciRunning(run, { test: 'playwright test' }));
+    assert.equal(dim(prepare(root), 6).determined, 1, run);
+  }
+});
+
+test('a gitlab script list that runs the suite determines CI at level 1', (t) => {
+  const yaml = ['stages: [test]', 'e2e:', '  stage: test', '  script:', '    - cd e2e', '    - npx playwright test'].join('\n');
+  const root = makeRepo(t, {
+    'e2e/playwright.config.ts': CONFIG,
+    'e2e/tests/con.spec.ts': specFile(10, 0),
+    '.gitlab-ci.yml': yaml,
+  });
+  assert.equal(dim(prepare(root), 6).determined, 1);
+});
+
+test('a gitlab before_script that runs the suite determines CI at level 1', (t) => {
+  const yaml = ['stages: [test]', 'e2e:', '  stage: test', '  before_script:', '    - npx playwright test', '  script:', '    - echo done'].join('\n');
+  const root = makeRepo(t, {
+    'e2e/playwright.config.ts': CONFIG,
+    'e2e/tests/con.spec.ts': specFile(10, 0),
+    '.gitlab-ci.yml': yaml,
+  });
+  assert.equal(dim(prepare(root), 6).determined, 1);
+});
+
+test('a script that resolves to another runner does not run the suite: CI is 0', (t) => {
+  for (const run of ['npm run e2e', 'npm test', 'yarn test', 'pnpm run e2e']) {
+    const root = makeRepo(t, ciRunning(run, { e2e: 'jest', test: 'vitest run' }));
+    assert.equal(dim(prepare(root), 6).determined, 0, run);
+  }
+});
+
+test('npm test with no package.json to resolve keeps counting, as it always did', (t) => {
+  const root = makeRepo(t, ciRunning('npm test'));
+  assert.equal(dim(prepare(root), 6).determined, 1);
+});
+
+test('an unresolvable yarn or pnpm script is not counted', (t) => {
+  // Only the legacy npm test forms keep the benefit of the doubt.
+  for (const run of ['yarn e2e', 'pnpm test']) {
+    const root = makeRepo(t, ciRunning(run));
+    assert.equal(dim(prepare(root), 6).determined, 0, run);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // The judgment surface
 // ---------------------------------------------------------------------------
