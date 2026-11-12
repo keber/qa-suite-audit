@@ -1,5 +1,13 @@
 # Judgment Protocol - v1
 
+The rubric you are applying is by Adriana Troche Robles, published on Calidad
+sin Humo:
+https://calidadsinhumo.com/guias/rubrica-para-juzgar-una-suite-de-tests/
+
+Read it before judging anything. This protocol governs how a level is recorded
+and what it must cite; it does not restate what each level means, and a level
+assigned without having read its definition is a guess with a citation attached.
+
 Input: the output of `judge-prep.js` for one repository.
 Output: one verdict object, shape below.
 

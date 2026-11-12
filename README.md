@@ -7,6 +7,31 @@ validator checks the verdict. The three stay separate on purpose: a score that
 cannot be traced back to something a machine measured is an opinion with a
 number attached, and it stops being comparable the moment anything changes.
 
+## The rubric is not mine
+
+This tool implements someone else's thinking. The seven dimensions it scores -
+Oracle, Sensitivity, Determinism, Diagnosis, Business rule coverage, Life in CI,
+Maintainability - their level definitions, the 0 to 3 scale, the verdict bands
+and the two eliminatory dimensions all come from:
+
+> **[Como saber si tus tests automatizados sirven: la rubrica de 7 criterios para auditar una suite](https://calidadsinhumo.com/guias/rubrica-para-juzgar-una-suite-de-tests/)**
+> by **Adriana Troche Robles**, published 18 August 2026 on
+> [Calidad sin Humo](https://calidadsinhumo.com/).
+
+She also publishes an [interactive self-assessment](https://calidadsinhumo.com/recursos/cuanto-saca-tu-suite/)
+built on the same rubric, which is the fastest way to see what it asks before
+reading any of this code.
+
+What this repository adds is narrow and mechanical: a way to gather the evidence
+a rubric level should cite, bounds that stop a level being assigned past what the
+evidence supports, and a validator that refuses a verdict which does not match
+the evidence it claims to read. The judgement the rubric asks for is still a
+person's, or an agent's, to make.
+
+The quoted rubric text in `src/thresholds.json` is reproduced for the purpose of
+recording which sentence each threshold interprets. That text is the author's
+work and is not covered by this repository's license.
+
 ## Scope of v1
 
 **Repository evidence only.** No CI API, no run history, no branch policies.

@@ -1,5 +1,13 @@
 # Evidence Catalogue - v1
 
+The rubric these items feed is not this project's work. The seven dimensions,
+their level definitions and the verdict rules come from "Como saber si tus tests
+automatizados sirven: la rubrica de 7 criterios para auditar una suite" by
+Adriana Troche Robles, published on Calidad sin Humo:
+https://calidadsinhumo.com/guias/rubrica-para-juzgar-una-suite-de-tests/
+
+This document only describes what evidence a level can be made to cite.
+
 Scope: **repository evidence only**. No CI API, no run history, no branch policies.
 
 This catalogue defines what the scripts extract. It does not assign scores.
