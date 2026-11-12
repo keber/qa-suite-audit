@@ -7,16 +7,15 @@ validator checks the verdict. The three stay separate on purpose: a score that
 cannot be traced back to something a machine measured is an opinion with a
 number attached, and it stops being comparable the moment anything changes.
 
-## The rubric is not mine
+## Adriana Troche's Calidad sin Humo rubric
 
-This tool implements someone else's thinking. The seven dimensions it scores -
-Oracle, Sensitivity, Determinism, Diagnosis, Business rule coverage, Life in CI,
-Maintainability - their level definitions, the 0 to 3 scale, the verdict bands
-and the two eliminatory dimensions all come from:
-
-> **[Como saber si tus tests automatizados sirven: la rubrica de 7 criterios para auditar una suite](https://calidadsinhumo.com/guias/rubrica-para-juzgar-una-suite-de-tests/)**
-> by **Adriana Troche Robles**, published 18 August 2026 on
-> [Calidad sin Humo](https://calidadsinhumo.com/).
+This tool implements the audit criteria Adriana Troche Robles published in
+[Como saber si tus tests automatizados sirven: la rubrica de 7 criterios para auditar una suite](https://calidadsinhumo.com/guias/rubrica-para-juzgar-una-suite-de-tests/)
+(Calidad sin Humo, 18 August 2026). The rubric scores seven dimensions - Oracle,
+Sensitivity, Determinism, Diagnosis, Business rule coverage, Life in CI,
+Maintainability - and defines their levels, the 0 to 3 scale, the verdict bands
+and the two eliminatory dimensions. This tool uses all of them except the verdict
+bands, for the reason given under Scope of v1.
 
 She also publishes an [interactive self-assessment](https://calidadsinhumo.com/recursos/cuanto-saca-tu-suite/)
 built on the same rubric, which is the fastest way to see what it asks before
@@ -31,6 +30,25 @@ person's, or an agent's, to make.
 The quoted rubric text in `src/thresholds.json` is reproduced for the purpose of
 recording which sentence each threshold interprets. That text is the author's
 work and is not covered by this repository's license.
+
+## Where this departs from the author's evidence prompt
+
+The self-assessment page also offers a prompt, MIT licensed by the same author,
+that asks an agent to gather the evidence for the rubric and to stop there. This
+tool keeps its rules: it only reads and never runs the suite; every claim carries
+a file and a line; absent evidence is reported as absent, never guessed; what
+only a person can answer is asked of the team rather than assumed
+(`teamQuestions`); and the verdict states what kind of suite it is judging before
+it scores anything (`suiteType`, Step 0 of `docs/JUDGMENT-PROTOCOL.md`).
+
+It departs from the prompt on purpose in four places:
+
+| The prompt | This tool | Why |
+|---|---|---|
+| The agent gathers evidence; a person assigns the number | An agent assigns each level inside bounds the evidence sets, and a validator rejects a level that is uncited, out of bounds or bound to different evidence | Repeatability: the same evidence must yield a checkable verdict on every run. The cost is real: the validator checks coherence, not judgement, so a fully cited verdict can still be wrong, and a person still has to answer for it |
+| Samples five asserts, ten test names, three tests at random | Ratios over the whole resolved suite, with a file and line for every test counted | A random sample changes between runs and cannot be compared over time. Sampling remains how the judge reads the question the evidence leaves open |
+| Asks about order dependence, shared state, copy-paste duplication and whether names speak of the business | Left to the judge's open question, and listed under "Not extracted in v1" in `docs/EVIDENCE-CATALOGUE.md` with the reason | A text scanner cannot answer them without false certainty, and a wrong count is worse than an honest gap |
+| One pass, ending in a table | Evidence bound to a digest; a verdict written against different evidence is rejected as stale | An audit meant to be repeated on the same repository has to tell a changed suite from a changed reading |
 
 ## Scope of v1
 
