@@ -46,9 +46,6 @@ const PRUNED_DIRS = new Set([
   'coverage', 'test-results', 'playwright-report', '.auth', '.vs', '.vscode', '.idea',
 ]);
 
-/** Run steps that execute a Playwright suite. */
-const SUITE_RUN = /\b(npx\s+playwright\s+test|playwright\s+test|npm\s+(run\s+)?test)\b/g;
-
 /** Steps that make results visible after the run. */
 const PUBLISH_RESULTS  = /PublishTestResults@\d|actions\/upload-artifact@|PublishPipelineArtifact@\d|PublishBuildArtifacts@\d/g;
 const PUBLISH_TO_PLANS = /ADO_[A-Z_]*PLAN_ID|playwright-azure-reporter|SYSTEM_ACCESSTOKEN/g;
@@ -184,7 +181,11 @@ function analyze(repoRoot, file, suiteIds) {
   // repository root is invoked by running the runner at all; a nested suite
   // must be named, either exactly or by an ancestor directory such as
   // qa/07-automation for a suite at qa/07-automation/e2e.
-  const runSteps = count(text, SUITE_RUN);
+  //
+  // "Invokes the runner" is decided by the same finder D6.run-scope uses: a
+  // direct `playwright test`, or an npm/yarn/pnpm script that expands to it.
+  const scan = scanInvocations(repoRoot, file);
+  const runSteps = scan.invocations.length + scan.unresolvedNpmTest;
   const suitePaths = runSteps > 0
     ? suiteIds.filter(id => id === '.' || referencesPath(text, id))
     : [];
@@ -215,7 +216,7 @@ function analyze(repoRoot, file, suiteIds) {
 // the extractor does not guess.
 
 /** YAML keys whose value is a shell command. A displayName only talks about one. */
-const COMMAND_KEYS = new Set(['script', 'run', 'bash', 'powershell', 'pwsh', 'cmd', 'command', 'inlinescript']);
+const COMMAND_KEYS = new Set(['script', 'before_script', 'after_script', 'run', 'bash', 'powershell', 'pwsh', 'cmd', 'command', 'inlinescript']);
 
 /** `<indent>[- ]key: value`. Group 1 is the prefix, so its length is the key column. */
 const YAML_KEY     = /^(\s*(?:-\s+)*)([A-Za-z_][\w.-]*)\s*:\s*(.*)$/;
@@ -305,6 +306,72 @@ function fold(entries) {
 }
 
 /**
+ * The items of a block sequence that follows a command key, as logical lines.
+ * `lines[from]` is the first line after the key. Returns null when no list
+ * follows, or when it is a list of mappings (items like `- name: x` are
+ * structure, not commands, and their own command keys are read on their own).
+ * `next` is the first line after the list.
+ *
+ * YAML lets a list sit at the same column as its key, so `allowSameColumn`
+ * admits dashes there when the key itself is not a list item.
+ */
+function sequenceItems(lines, from, keyColumn, allowSameColumn) {
+  let first = from;
+  while (first < lines.length && (lines[first].trim() === '' || lines[first].trim().startsWith('#'))) first++;
+  if (first >= lines.length) return null;
+
+  const dashColumn = indentOf(lines[first]);
+  const isItem = (line) => /^-(\s|$)/.test(line.trim());
+  const deeper = dashColumn > keyColumn || (allowSameColumn && dashColumn === keyColumn);
+  if (!deeper || !isItem(lines[first]) || YAML_KEY.test(lines[first].replace(/^\s*-\s+/, ''))) return null;
+
+  const entries = [];
+  let j = first;
+  while (j < lines.length) {
+    const line = lines[j];
+    if (line.trim() === '' || line.trim().startsWith('#')) { j++; continue; }
+    if (indentOf(line) !== dashColumn || !isItem(line)) break;
+
+    const value = line.replace(/^\s*-\s*/, '').trim();
+    const startLine = j + 1;
+    const body = [];
+    j++;
+    // Deeper lines belong to this item: a block scalar body or a wrapped scalar.
+    while (j < lines.length && (lines[j].trim() === '' || indentOf(lines[j]) > dashColumn)) {
+      body.push({ line: j + 1, text: lines[j] });
+      j++;
+    }
+
+    if (BLOCK_HEADER.test(value)) {
+      entries.push(...(value.startsWith('>') ? fold(body) : joinContinuations(body)));
+    } else {
+      const parts = [{ line: startLine, text: value }, ...body];
+      entries.push(...joinContinuations(parts).map(e => ({ ...e, text: unquoteYaml(e.text) })));
+    }
+  }
+
+  // Trailing blank lines were consumed; hand back only what the list used.
+  return { entries, next: j };
+}
+
+/** The items of a one-line flow list `["a", 'b', c]`, or null when it is not one. */
+function flowItems(value, line) {
+  if (!value.startsWith('[') || !value.endsWith(']')) return null;
+
+  const items = [];
+  let word = '';
+  let quote = null;
+  for (const c of value.slice(1, -1)) {
+    if (quote) { if (c === quote) quote = null; else word += c; }
+    else if (c === '"' || c === "'") quote = c;
+    else if (c === ',') { items.push(word.trim()); word = ''; }
+    else word += c;
+  }
+  items.push(word.trim());
+  return items.filter(Boolean).map(text => ({ line, text }));
+}
+
+/**
  * The shell commands of a pipeline as logical lines, each with the physical
  * line it starts on. Only values under command keys count, so a step named
  * "Run npx playwright test" is not an invocation.
@@ -331,15 +398,22 @@ function commandLines(text) {
       }
       logical = value.startsWith('>') ? fold(body) : joinContinuations(body);
       i = j - 1;
-    } else if (value !== '') {
+    } else if (value === '') {
+      // GitLab, Bitbucket and others give the command key a list: `script:`
+      // followed by `- cmd` items. An empty key with no list has no command.
+      const seq = sequenceItems(lines, i + 1, keyColumn, !m[1].includes('-'));
+      if (!seq) continue;
+      logical = seq.entries;
+      i = seq.next - 1;
+    } else if (flowItems(value, i + 1)) {
+      logical = flowItems(value, i + 1);
+    } else {
       const body = [{ line: i + 1, text: value }];
       while (CONTINUATION.test(body[body.length - 1].text) && i + 1 < lines.length) {
         body.push({ line: i + 2, text: lines[i + 1] });
         i++;
       }
       logical = joinContinuations(body).map(e => ({ ...e, text: unquoteYaml(e.text) }));
-    } else {
-      continue;
     }
 
     for (const e of logical) entries.push({ ...e, keyIndex });
@@ -475,8 +549,8 @@ function parseRunnerArgs(args) {
   return { filters, paths };
 }
 
-/** One package script followed one level, never recursively. */
-function packageScriptInvocations(words, scripts) {
+/** The package script a command names (`npm test`, `npm run X`, `yarn X`, `pnpm run X`), or null. */
+function scriptCall(words) {
   const [manager, ...rest] = words;
   let name;
   let extra = [];
@@ -490,7 +564,24 @@ function packageScriptInvocations(words, scripts) {
     extra = rest.slice(k + 1);
   }
 
-  if (!name || name.startsWith('-') || typeof scripts?.[name] !== 'string') return [];
+  if (!name || name.startsWith('-')) return null;
+  return { manager, name, extra };
+}
+
+/**
+ * The spellings D6.suite-invocation accepted before scripts were resolved:
+ * `npm test` and `npm run test...`. Only these keep counting when their script
+ * cannot be read (see scanInvocations).
+ */
+function isLegacyNpmTest(words) {
+  return words[0] === 'npm' && (words[1] === 'test' || (words[1] === 'run' && /^test/.test(words[2] ?? '')));
+}
+
+/** One package script followed one level, never recursively. */
+function packageScriptInvocations(words, scripts) {
+  const call = scriptCall(words);
+  if (!call || typeof scripts?.[call.name] !== 'string') return [];
+  const { manager, name, extra } = call;
 
   // npm forwards only what follows `--`; yarn and pnpm forward the rest as given.
   const dashes = extra.indexOf('--');
@@ -583,8 +674,47 @@ function describeInvocation({ args, via, script }, line, raw) {
   return invocation;
 }
 
-/** Every runner invocation in one pipeline file, direct or one package script away. */
-function runInvocations(repoRoot, file) {
+/**
+ * `bash -c "cd e2e && npx playwright test"` hides its commands inside one
+ * quoted word, which the tokenizer rightly keeps whole. The old text match saw
+ * through it, so the inner string is split again into commands. Only the
+ * common shell launchers are unwrapped; anything else stays one command.
+ */
+function expandShellWrappers(commands) {
+  const out = [];
+  for (const raw of commands) {
+    const words = dropEnvAssignments(raw);
+    const launcher = (words[0] ?? '').split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '');
+    const flagAt = /^(?:sh|bash|zsh|dash)$/.test(launcher)
+      ? words.findIndex((w, k) => k > 0 && /^-[a-z]*c$/.test(w))
+      : /^(?:pwsh|powershell)$/.test(launcher)
+        ? words.findIndex((w, k) => k > 0 && /^-(?:c|command)$/i.test(w))
+        : launcher === 'cmd' ? words.findIndex((w, k) => k > 0 && /^\/[ck]$/i.test(w)) : -1;
+
+    if (flagAt === -1 || flagAt + 1 >= words.length) { out.push(raw); continue; }
+    out.push(...expandShellWrappers(splitCommands(words.slice(flagAt + 1).join(' '))));
+  }
+  return out;
+}
+
+/**
+ * The single invocation finder behind D6.suite-invocation and D6.run-scope, so
+ * the two cannot disagree about what a pipeline runs.
+ *
+ *   invocations      every runner call, direct or one package script away
+ *   unresolvedNpmTest  `npm test` / `npm run test...` whose script is not in the
+ *                    nearest package.json (or there is none)
+ *
+ * Why the second list exists: before scripts were resolved, any `npm test`
+ * counted as running the suite. Dropping that would turn pipelines that used to
+ * count into a settled D6 = 0 on no evidence, so an UNRESOLVABLE npm test keeps
+ * counting. A script that DOES resolve is held to what it says: `jest` or
+ * `vitest` is positive evidence the suite is not run, and does not count. The
+ * benefit of the doubt applies to the legacy npm spellings only; an unresolved
+ * `yarn X` or `pnpm X` was never counted and still is not. Unresolved calls
+ * carry no filters, so run-scope does not list them.
+ */
+function scanInvocations(repoRoot, file) {
   const root = path.resolve(repoRoot);
   const { lines, entries } = commandLines(fs.readFileSync(file, 'utf8'));
   const scriptCache = new Map();
@@ -594,10 +724,11 @@ function runInvocations(repoRoot, file) {
   };
 
   const invocations = [];
+  let unresolvedNpmTest = 0;
   for (const entry of entries) {
     let cwd = resolveDir(root, root, literalDir(stepWorkingDirectory(lines, entry.keyIndex)) ?? '');
 
-    for (const raw of splitCommands(entry.text)) {
+    for (const raw of expandShellWrappers(splitCommands(entry.text))) {
       const words = dropEnvAssignments(raw);
       if (words.length === 0 || PRINTERS.has(words[0].toLowerCase())) continue;
 
@@ -608,11 +739,22 @@ function runInvocations(repoRoot, file) {
       }
 
       const direct = runnerArgs(words);
-      const found  = direct ? [{ args: direct }] : packageScriptInvocations(words, scriptsAt(cwd));
+      const scripts = direct ? null : scriptsAt(cwd);
+      const found   = direct ? [{ args: direct }] : packageScriptInvocations(words, scripts);
       for (const f of found) invocations.push(describeInvocation(f, entry.line, entry.text));
+
+      if (!direct && isLegacyNpmTest(words)) {
+        const call = scriptCall(words);
+        if (call && typeof scripts[call.name] !== 'string') unresolvedNpmTest++;
+      }
     }
   }
-  return invocations;
+  return { invocations, unresolvedNpmTest };
+}
+
+/** Every runner invocation in one pipeline file, direct or one package script away. */
+function runInvocations(repoRoot, file) {
+  return scanInvocations(repoRoot, file).invocations;
 }
 
 function summarizeRunScope(repoRoot, running) {
@@ -662,7 +804,7 @@ function extractPipelines(repoRoot) {
       },
       'D6.suite-invocation': {
         pipelinesRunningTheSuite: running.length,
-        note: 'a pipeline counts only when it invokes the runner AND names a resolved suite directory',
+        note: 'a pipeline counts only when it invokes the runner (directly, or through an npm/yarn/pnpm script that expands to playwright test; an unresolvable npm test still counts) AND names a resolved suite directory',
         files: running.map(p => p.file).sort(),
       },
       'D6.run-scope': summarizeRunScope(repoRoot, running),
