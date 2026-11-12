@@ -117,6 +117,12 @@ test('no item is both extracted and declared not extracted', () => {
   assert.equal(new Set(notExtracted).size, notExtracted.length, 'an item is listed twice under not extracted');
 });
 
+test('D7.page-object-usage is documented as extracted, not as a gap', () => {
+  const { extracted, notExtracted } = parseCatalogue();
+  assert.ok(extracted.includes('D7.page-object-usage'));
+  assert.ok(!notExtracted.includes('D7.page-object-usage'));
+});
+
 test('a not-extracted item is never emitted', (t) => {
   const { notExtracted } = parseCatalogue();
   const input = prepare(makeRepo(t, FIXTURE));

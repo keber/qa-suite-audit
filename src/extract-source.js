@@ -11,6 +11,7 @@
  *                          D2.skipped-tests       D3.serial-mode
  *   D5.priority-distribution
  *   D5.skip-ratio          D4.trace-config        D7.selector-mix
+ *                                                 D7.page-object-usage
  *                          D3.flaky-markers
  *                          D4.reporter-config
  *                          D4.artifact-retention
@@ -33,7 +34,7 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { resolveSuite, findTopLevelValue, stripComments } = require('./resolve-suite.js');
+const { resolveSuite, findTopLevelValue, stripComments, PRUNED_DIRS, relative } = require('./resolve-suite.js');
 
 // ---------------------------------------------------------------------------
 // Signal vocabulary
@@ -484,6 +485,326 @@ function countIn(text, re) {
 }
 
 // ---------------------------------------------------------------------------
+// Layers: page objects, fixtures, helpers (D7.page-object-usage)
+// ---------------------------------------------------------------------------
+
+/**
+ * How the layers a suite is built on are found. INFERENTIAL, and kept simple on
+ * purpose: this is an import graph one level deep over masked source, not a
+ * module resolver.
+ *
+ *   Layer file    a file a suite test file imports through a RELATIVE specifier
+ *                 (import ... from './x', import './x', require('../x')) that
+ *                 resolves, with .ts .js .mjs .cjs .tsx or /index.*, to a file
+ *                 inside the repository and is not itself a suite test file.
+ *                 Type-only imports are skipped: they leave no runtime layer.
+ *   Kind          pageObject when the file declares a class that takes `page` in
+ *                 its constructor or stores `this.page =`, or its basename says
+ *                 page/screen/component and it exports a class; fixture when it
+ *                 calls .extend( on test/base; otherwise helper.
+ *   Layered test  its masked body calls something bound to an imported layer
+ *                 symbol (Sym(...), Sym.m(...), or inst.m(...) where
+ *                 inst = new Sym(...) anywhere in the file), or uses a fixture
+ *                 declared by test.extend as a destructured parameter, or
+ *                 delegates an assertion (ASSERTION_PROXY).
+ *   Inline test   calls page.* or request.* in its own body and is not layered.
+ *
+ * Known blind spots, reported rather than hidden:
+ *   - Path aliases (tsconfig/jsconfig `paths`, e.g. '@pages/...') and baseUrl
+ *     imports are not resolved. Aliased imports matching a `paths` key, relative
+ *     imports that resolve to nothing, and relative imports that land inside a
+ *     PRUNED_DIRS directory all count in layers.unresolvedImports. A suite that
+ *     imports everything through aliases looks like it has no layers; read the
+ *     count before reading the share.
+ *   - Only direct imports of test files are followed. A page object reached
+ *     through a fixtures file is seen via the fixture, not as its own layer.
+ *   - `test`, `expect` and `base` imported from a fixtures file are Playwright's
+ *     own, not layer calls. A custom fixture named like a built-in (`page`,
+ *     `request`...) is not treated as a layer either.
+ *   - Fixture names are the identifier keys of the object passed to .extend();
+ *     quoted keys are missed. A fixture holding plain data is only seen if the
+ *     test calls it (data.x.y()), so data fixtures under-count.
+ *   - A helper that does not touch the page still counts as layered when called;
+ *     the item says a test is built on shared code, not that the code is good.
+ */
+const RESOLVE_EXTENSIONS = ['.ts', '.js', '.mjs', '.cjs', '.tsx'];
+const PLAYWRIGHT_OWN     = new Set(['test', 'expect', 'base']);
+const BUILTIN_FIXTURES   = new Set(['page', 'context', 'browser', 'request', 'browserName']);
+
+const ES_IMPORT      = /\bimport\s+(type\s+)?([^;'"`]*?)\s*\bfrom\s*(['"])([^'"\n]+)\3/g;
+const BARE_IMPORT    = /\bimport\s*(['"])([^'"\n]+)\1/g;
+const REQUIRE_CALL   = /(?:\b(?:const|let|var)\s+([^=;]+?)\s*=\s*)?\brequire\s*\(\s*(['"])([^'"\n]+)\2\s*\)/g;
+const EXTEND_CALL    = /\b(?:test|base|[A-Za-z_]\w*Test)\s*\.\s*extend\s*(?:<[^()]*?>)?\s*\(/g;
+const DIRECT_PAGE_API = /(?<![\w$.])(?:page|request)\s*\??\.\s*[\w$]+/g;
+
+function isFile(p) {
+  try { return fs.statSync(p).isFile(); } catch { return false; }
+}
+
+/** Does any directory segment of a repo-relative path belong to PRUNED_DIRS? */
+function insidePrunedDir(rel) {
+  return rel.split('/').slice(0, -1).some(seg => PRUNED_DIRS.has(seg));
+}
+
+/** Repo-relative path of the file a relative specifier points at, or null. */
+function resolveRelativeImport(repoRoot, fromRel, spec) {
+  const base = path.resolve(repoRoot, path.dirname(fromRel), spec);
+  // TypeScript ESM writes './x.js' for a source file named x.ts.
+  const stem = base.replace(/\.[cm]?js$/, '');
+  const candidates = [
+    ...(RESOLVE_EXTENSIONS.includes(path.extname(base)) ? [base] : []),
+    ...RESOLVE_EXTENSIONS.map(e => base + e),
+    ...(stem !== base ? RESOLVE_EXTENSIONS.map(e => stem + e) : []),
+    ...RESOLVE_EXTENSIONS.map(e => path.join(base, 'index' + e)),
+  ];
+
+  const hit = candidates.find(isFile);
+  if (!hit) return null;
+
+  const rel = relative(repoRoot, hit);
+  return rel.startsWith('..') || insidePrunedDir(rel) ? null : rel;
+}
+
+/**
+ * Specifier prefixes declared under `paths` in the nearest tsconfig.json or
+ * jsconfig.json above a file. Only the keys are read: the point is to recognise
+ * an import as an alias, not to resolve it. `extends` chains are not followed.
+ */
+function aliasMatchers(repoRoot, fromRel, cache) {
+  let dir = path.resolve(repoRoot, path.dirname(fromRel));
+  const root = path.resolve(repoRoot);
+
+  for (;;) {
+    if (cache.has(dir)) return cache.get(dir);
+
+    for (const name of ['tsconfig.json', 'jsconfig.json']) {
+      const file = path.join(dir, name);
+      if (!isFile(file)) continue;
+      const matchers = readAliasKeys(file);
+      cache.set(dir, matchers);
+      return matchers;
+    }
+
+    if (dir === root || path.dirname(dir) === dir) break;
+    dir = path.dirname(dir);
+  }
+
+  cache.set(path.resolve(repoRoot, path.dirname(fromRel)), []);
+  return [];
+}
+
+function readAliasKeys(file) {
+  try {
+    const text = stripComments(fs.readFileSync(file, 'utf8')).replace(/,(\s*[}\]])/g, '$1');
+    const paths = JSON.parse(text)?.compilerOptions?.paths ?? {};
+    return Object.keys(paths).map(key => ({ key, prefix: key.replace(/\*.*$/, ''), exact: !key.includes('*') }));
+  } catch {
+    return [];
+  }
+}
+
+function isAlias(spec, matchers) {
+  return matchers.some(m => (m.exact ? spec === m.key : m.prefix !== '' && spec.startsWith(m.prefix)));
+}
+
+/** Local binding names introduced by an import or require clause. */
+function boundNames(clause) {
+  const names = [];
+  const c = (clause ?? '').trim();
+  if (!c) return names;
+
+  const ns = /\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(c);
+  if (ns) names.push(ns[1]);
+
+  const braces = /\{([^}]*)\}/.exec(c);
+  if (braces) {
+    for (const part of braces[1].split(',')) {
+      const p = part.trim().replace(/^type\s+/, '');
+      if (!p) continue;
+      // ES: `a as b`, CommonJS destructuring: `a: b`. The local name is last.
+      const renamed = /(?:\bas\s+|:\s*)([A-Za-z_$][\w$]*)\s*$/.exec(p);
+      names.push(renamed ? renamed[1] : p.replace(/\s.*$/, ''));
+    }
+  }
+
+  const head = c.replace(/\{[^}]*\}/, '').replace(/\*\s*as\s+[\w$]+/, '').replace(/,/g, ' ').trim();
+  if (/^[A-Za-z_$][\w$]*$/.test(head)) names.push(head);
+
+  return names;
+}
+
+/** Every runtime import of one file: { spec, names }. Comments are blanked first. */
+function readImports(src) {
+  const text   = blankComments(src);
+  const masked = maskSource(src);
+  const found  = [];
+  // A keyword inside a string literal is blank in the masked copy.
+  const live = (m) => masked[m.index] === text[m.index];
+
+  for (const m of text.matchAll(ES_IMPORT)) {
+    if (live(m) && !m[1]) found.push({ spec: m[4], names: boundNames(m[2]) });
+  }
+  for (const m of text.matchAll(BARE_IMPORT)) {
+    if (live(m)) found.push({ spec: m[2], names: [] });
+  }
+  for (const m of text.matchAll(REQUIRE_CALL)) {
+    if (live(m)) found.push({ spec: m[3], names: boundNames(m[1]) });
+  }
+
+  return found;
+}
+
+/** Identifier keys at the top level of the object literal passed to each .extend( call. */
+function readExtendDeclarations(masked) {
+  const out = [];
+  EXTEND_CALL.lastIndex = 0;
+  let m;
+
+  while ((m = EXTEND_CALL.exec(masked)) !== null) {
+    const openParen = m.index + m[0].length - 1;
+    const closeParen = matchParen(masked, openParen);
+    const brace = masked.indexOf('{', openParen);
+    const keys = [];
+
+    if (closeParen !== -1 && brace !== -1 && brace < closeParen) {
+      let depth = 0;
+      for (let i = brace; i < closeParen; i++) {
+        const c = masked[i];
+        if (c === '{' || c === '(' || c === '[') depth++;
+        else if (c === '}' || c === ')' || c === ']') depth--;
+        else if (depth === 1 && /[A-Za-z_$]/.test(c) && !/[\w$]/.test(masked[i - 1] ?? '')) {
+          const key = /^([A-Za-z_$][\w$]*)\s*:/.exec(masked.slice(i));
+          const before = masked.slice(brace, i).trimEnd().slice(-1);
+          if (key && (before === '{' || before === ',')) keys.push(key[1]);
+        }
+      }
+    }
+    out.push(keys);
+  }
+
+  return out;
+}
+
+function classifyLayerFile(masked, relPath, declaresExtend) {
+  const hasClass = /\bclass\s+[A-Za-z_$][\w$]*/.test(masked);
+  const ctor     = /\bconstructor\s*\(([^)]*)\)/.exec(masked);
+  const takesPage = Boolean(ctor && /\bpage\b/.test(ctor[1])) || /\bthis\s*\.\s*page\s*=/.test(masked);
+  const named    = /page|screen|component/i.test(path.basename(relPath, path.extname(relPath)));
+
+  if (hasClass && takesPage) return 'pageObject';
+  if (named && /\bexport\s+(?:default\s+)?class\b/.test(masked)) return 'pageObject';
+  if (declaresExtend) return 'fixture';
+  return 'helper';
+}
+
+/**
+ * Read the layers of one suite: which files its tests import, what kind each is,
+ * which symbols and fixtures each test file can reach, and what could not be
+ * resolved. Built once per suite so a test body can be judged without rereading.
+ */
+function buildLayerIndex(repoRoot, suiteFiles) {
+  const suiteSet = new Set(suiteFiles);
+  const aliasCache = new Map();
+  const kinds = new Map();         // layer file -> kind
+  const declarations = new Map();  // file -> number of .extend( declarations
+  const unresolved = new Map();    // test file -> unresolved import count
+  const byFile = new Map();        // test file -> { symbols, fixtures }
+  const layerInfo = new Map();     // layer file -> { fixtureKeys }
+
+  const inspectLayer = (rel) => {
+    if (layerInfo.has(rel)) return layerInfo.get(rel);
+    const masked = maskSource(fs.readFileSync(path.join(repoRoot, rel), 'utf8'));
+    const extended = readExtendDeclarations(masked);
+    const info = { fixtureKeys: extended.flat() };
+    kinds.set(rel, classifyLayerFile(masked, rel, extended.length > 0));
+    if (extended.length) declarations.set(rel, extended.length);
+    layerInfo.set(rel, info);
+    return info;
+  };
+
+  for (const file of suiteFiles) {
+    const src = fs.readFileSync(path.join(repoRoot, file), 'utf8');
+    const symbols = new Set();
+    const fixtures = new Set();
+    let misses = 0;
+
+    const own = readExtendDeclarations(maskSource(src));
+    if (own.length) declarations.set(file, own.length);
+    own.flat().forEach(k => fixtures.add(k));
+
+    for (const { spec, names } of readImports(src)) {
+      if (/^\.{1,2}(?:\/|$)/.test(spec)) {
+        const rel = resolveRelativeImport(repoRoot, file, spec);
+        if (!rel) { misses++; continue; }
+        if (suiteSet.has(rel)) continue;
+        inspectLayer(rel).fixtureKeys.forEach(k => fixtures.add(k));
+        names.filter(n => !PLAYWRIGHT_OWN.has(n)).forEach(n => symbols.add(n));
+      } else if (isAlias(spec, aliasMatchers(repoRoot, file, aliasCache))) {
+        misses++;
+      }
+    }
+
+    BUILTIN_FIXTURES.forEach(n => fixtures.delete(n));
+    if (misses) unresolved.set(file, misses);
+    byFile.set(file, { symbols, fixtures });
+  }
+
+  return { byFile, kinds, declarations, unresolved };
+}
+
+/** Fold several suite indexes into the extras `aggregate` reads. */
+function layerExtras(...indexes) {
+  const kinds = new Map();
+  const declarations = new Map();
+  const unresolved = new Map();
+  for (const ix of indexes) {
+    ix.kinds.forEach((v, k) => kinds.set(k, v));
+    ix.declarations.forEach((v, k) => declarations.set(k, v));
+    ix.unresolved.forEach((v, k) => unresolved.set(k, v));
+  }
+
+  const count = (kind) => [...kinds.values()].filter(v => v === kind).length;
+  return {
+    layers: {
+      files: [...kinds.keys()].sort(),
+      kinds: { pageObject: count('pageObject'), fixture: count('fixture'), helper: count('helper') },
+      unresolvedImports: [...unresolved.values()].reduce((a, b) => a + b, 0),
+    },
+    customFixtures: {
+      count: [...declarations.values()].reduce((a, b) => a + b, 0),
+      files: [...declarations.keys()].sort(),
+    },
+  };
+}
+
+/** Names a test callback destructures from its first parameter: async ({ a, b: c }) => */
+function destructuredParams(body) {
+  const m = /\(\s*\{([^{}]*)\}\s*(?:,[^)]*)?\)\s*(?:=>|\{)/.exec(body);
+  if (!m) return [];
+  return m[1].split(',')
+    .map(p => p.split('=')[0].trim())
+    .map(p => (p.includes(':') ? p.split(':')[1].trim() : p))
+    .filter(p => /^[A-Za-z_$][\w$]*$/.test(p));
+}
+
+/** A call on, or a method call through, any of the given names. */
+function callsAny(body, names) {
+  if (!names.length) return false;
+  const alt = names.map(n => n.replace(/\$/g, '\\$')).join('|');
+  return new RegExp(`(?<![\\w$.])(?:${alt})(?:\\s*\\??\\.\\s*[\\w$]+)*\\s*\\(`).test(body);
+}
+
+/** Layer reach of one test file: its symbols, and the instances built from them. */
+function layerNames(masked, reach) {
+  const instances = [];
+  for (const sym of reach.symbols) {
+    const re = new RegExp(`([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?new\\s+${sym.replace(/\$/g, '\\$')}\\s*\\(`, 'g');
+    for (const m of masked.matchAll(re)) instances.push(m[1]);
+  }
+  return [...reach.symbols, ...instances];
+}
+
+// ---------------------------------------------------------------------------
 // Per-file extraction
 // ---------------------------------------------------------------------------
 
@@ -500,14 +821,25 @@ function scanRiskRefs(repoRoot, relPath, scanner) {
   return scanner(fs.readFileSync(path.join(repoRoot, relPath), 'utf8'));
 }
 
-function extractFile(repoRoot, relPath, caseIdPattern = DEFAULT_CASE_ID) {
+/**
+ * @param {object|null} [layerIndex] from buildLayerIndex. Without it a test can
+ *   only be layered through an assertion proxy: nothing is known about imports.
+ */
+function extractFile(repoRoot, relPath, caseIdPattern = DEFAULT_CASE_ID, layerIndex = null) {
   const src = fs.readFileSync(path.join(repoRoot, relPath), 'utf8');
   const { tests, masked } = findTests(src);
+
+  const reach  = layerIndex?.byFile.get(relPath) ?? { symbols: new Set(), fixtures: new Set() };
+  const names  = layerNames(masked, reach);
 
   const records = tests.map(t => {
     // Structural counts run over the masked body so that a signal appearing
     // inside a string literal is never counted as code.
     const body = masked.slice(t.start, t.end + 1);
+
+    const usedFixtures = destructuredParams(body).filter(p => reach.fixtures.has(p));
+    const proxies      = countIn(body, ASSERTION_PROXY);
+    const layered      = proxies > 0 || callsAny(body, [...names, ...usedFixtures]);
 
     const assertions = countIn(body, ASSERTION);
     const title      = t.title;
@@ -535,7 +867,11 @@ function extractFile(repoRoot, relPath, caseIdPattern = DEFAULT_CASE_ID) {
       fixedWaits:       countIn(body, FIXED_WAIT),
       conditionalWaits: countIn(body, CONDITIONAL_WAIT),
       steps:            countIn(body, STEP),
-      assertionProxies: countIn(body, ASSERTION_PROXY),
+      assertionProxies: proxies,
+      layered,
+      // page.* / request.* written in the test itself, the raw material of the
+      // inline reading in D7.page-object-usage.
+      directPageCalls:  countIn(body, DIRECT_PAGE_API),
       conditionalSkips: countIn(body, CONDITIONAL_SKIP),
       expectedFailures: countIn(body, EXPECTED_FAILURE) + (t.declaredFailure ? 1 : 0),
       selectors: {
@@ -616,8 +952,10 @@ function ratio(a, b) {
 
 /**
  * @param {object[]} records per-test records
- * @param {{flakyComments?: string[]}} [extras] facts that live outside any test
- *   body and so cannot be derived from records: here, comment lines per file.
+ * @param {{flakyComments?: string[], layers?: object, customFixtures?: object}} [extras]
+ *   facts that live outside any test body and so cannot be derived from records:
+ *   comment lines per file, and the layer files and fixture declarations found
+ *   by buildLayerIndex (see layerExtras).
  */
 function aggregate(records, extras = {}) {
   const total   = records.length;
@@ -634,6 +972,12 @@ function aggregate(records, extras = {}) {
   const rawSelectors  = sum(r => r.selectors.raw);
   const flakyTagged   = records.filter(r => r.flakyTag).map(ref).sort();
   const flakyComments = [...(extras.flakyComments ?? [])].sort();
+  const layeredTests  = records.filter(r => r.layered);
+  const inlineTests   = records.filter(r => !r.layered && r.directPageCalls > 0);
+  const layers = extras.layers ?? {
+    files: [], kinds: { pageObject: 0, fixture: 0, helper: 0 }, unresolvedImports: 0,
+  };
+  const customFixtures = extras.customFixtures ?? { count: 0, files: [] };
 
   return {
     // D1
@@ -691,6 +1035,16 @@ function aggregate(records, extras = {}) {
       semanticShare: ratio(semantic + testId, semantic + testId + rawSelectors),
     },
     'D7.file-size': summarizeFiles(records),
+    // Every test, skipped or not: how a suite is built does not depend on
+    // whether a case currently runs. Evidence for the judge, never a threshold -
+    // see "Layers" above for what the import reading cannot see.
+    'D7.page-object-usage': {
+      evidenceClass: 'inferential',
+      layeredTests: { count: layeredTests.length, of: total, share: ratio(layeredTests.length, total) },
+      inlineTests: { count: inlineTests.length },
+      layers,
+      customFixtures,
+    },
   };
 }
 
@@ -765,9 +1119,12 @@ function median(values) {
 function extractEvidence(repoRoot, options = {}) {
   const caseIdPattern = options.caseIdPattern ?? DEFAULT_CASE_ID;
   const boundary = resolveSuite(repoRoot);
+  const layerIndexes = [];
 
   const suites = boundary.suites.map(suite => {
-    const records = suite.files.flatMap(f => extractFile(repoRoot, f, caseIdPattern));
+    const layerIndex = buildLayerIndex(repoRoot, suite.files);
+    layerIndexes.push(layerIndex);
+    const records = suite.files.flatMap(f => extractFile(repoRoot, f, caseIdPattern, layerIndex));
     const serialDeclarations = suite.files
       .map(f => countSerialDeclarations(fs.readFileSync(path.join(repoRoot, f), 'utf8')))
       .reduce((a, b) => ({
@@ -784,7 +1141,7 @@ function extractEvidence(repoRoot, options = {}) {
       configEvidence: extractConfig(repoRoot, suite.config),
       serialDeclarations,
       flakyComments,
-      items: aggregate(records, { flakyComments }),
+      items: aggregate(records, { flakyComments, ...layerExtras(layerIndex) }),
       tests: records.sort((a, b) => (a.file + a.line).localeCompare(b.file + b.line)),
     };
   });
@@ -806,7 +1163,10 @@ function extractEvidence(repoRoot, options = {}) {
       testFiles: boundary.totals.testFiles,
       unclaimed: boundary.totals.unclaimed,
     },
-    items: { ...aggregate(all, { flakyComments: suites.flatMap(s => s.flakyComments) }), ...configItems(suites) },
+    items: {
+      ...aggregate(all, { flakyComments: suites.flatMap(s => s.flakyComments), ...layerExtras(...layerIndexes) }),
+      ...configItems(suites),
+    },
     suites,
     warnings: boundary.warnings,
   };
@@ -831,6 +1191,8 @@ function printHuman(result) {
   console.log(`  D3.flaky-markers      ${i['D3.flaky-markers'].tags.count} tagged tests, ${i['D3.flaky-markers'].comments.count} comment lines`);
   console.log(`  D4.failure-context    ${i['D4.failure-context'].steps} steps in ${i['D4.failure-context'].testsWithSteps} tests`);
   console.log(`  D7.selector-mix       semantic=${i['D7.selector-mix'].semantic} testId=${i['D7.selector-mix'].testId} raw=${i['D7.selector-mix'].raw}  share=${i['D7.selector-mix'].semanticShare}`);
+  const po = i['D7.page-object-usage'];
+  console.log(`  D7.page-object-usage  ${po.layeredTests.count}/${po.layeredTests.of} layered, ${po.inlineTests.count} inline, ${po.layers.files.length} layer files, ${po.customFixtures.count} test.extend, ${po.layers.unresolvedImports} unresolved imports`);
   console.log('');
 
   for (const s of result.suites) {
@@ -866,4 +1228,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { extractEvidence, extractFile, findTests, maskSource, findComments, scanFlakyComments, aggregate, countSerialDeclarations, DEFAULT_CASE_ID, NEGATIVE_VOCABULARY };
+module.exports = { extractEvidence, extractFile, buildLayerIndex, findTests, maskSource, findComments, scanFlakyComments, aggregate, countSerialDeclarations, DEFAULT_CASE_ID, NEGATIVE_VOCABULARY };

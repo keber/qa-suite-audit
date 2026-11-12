@@ -857,3 +857,164 @@ test('flaky-markers covers every resolved suite file and is emitted with zero co
   const item = flakyItem(t, FLAKY_HEAD + `test('[TC-A-001] a',${FLAKY_BODY});`);
   assert.deepEqual(item, { count: 0, tags: { count: 0, tests: [] }, comments: { count: 0, at: [] } });
 });
+
+// ---------------------------------------------------------------------------
+// D7.page-object-usage
+// ---------------------------------------------------------------------------
+
+const LAYER_TREE = {
+  'playwright.config.ts': CONFIG,
+  'tsconfig.json': [
+    '{',
+    '  // aliases the extractor does not resolve',
+    '  "compilerOptions": { "paths": { "@pages/*": ["pages/*"], "@exact": ["x/y"] }, },',
+    '}',
+  ].join('\n'),
+  'pages/LoginPage.ts': [
+    "import type { Page } from '@playwright/test';",
+    'export class LoginPage {',
+    '  constructor(private page: Page) {}',
+    "  async login() { await this.page.click('#go'); }",
+    '}',
+  ].join('\n'),
+  'pages/LoginScreen.ts': 'export class LoginScreen { async open() {} }',
+  'pages/page-utils.ts': 'export function slug(s) { return s; }',
+  'fixtures/base.ts': [
+    "import { test as base } from '@playwright/test';",
+    "import { LoginPage } from '../pages/LoginPage';",
+    'export const test = base.extend<{ loginPage: LoginPage }>({',
+    '  loginPage: async ({ page }, use) => { await use(new LoginPage(page)); },',
+    '});',
+    "export { expect } from '@playwright/test';",
+  ].join('\n'),
+  'helpers/data.ts': "export function buildUser() { return { name: 'x' }; }",
+  // A vendored page object under node_modules must never become a layer.
+  'tests/node_modules/decoy/PageDecoy.ts': 'export class PageDecoy { constructor(page) { this.page = page; } }',
+  'tests/a.spec.ts': [
+    "import { LoginPage } from '../pages/LoginPage';",
+    "import { test, expect } from '../fixtures/base';",
+    "import { buildUser } from '../helpers/data';",
+    "import { Ghost } from '../ghost/Missing';",
+    "import { Aliased } from '@pages/Alias';",
+    "import { PageDecoy } from './node_modules/decoy/PageDecoy';",
+    "test('page object', async ({ page }) => { const lp = new LoginPage(page); await lp.login(); });",
+    "test('fixture', async ({ loginPage }) => { await loginPage.login(); });",
+    "test('helper', async ({ page }) => { const u = buildUser(); await page.fill('#n', u.name); });",
+    "test('inline', async ({ page }) => { await page.click('#go'); });",
+    "test('string only', async ({ page }) => { const s = 'loginPage.login() buildUser()'; await page.goto('/'); });",
+    "test('neither', async () => { expect(1).toBe(1); });",
+    "test('proxy', async ({ page }) => { await verifyTitle(page); });",
+  ].join('\n'),
+};
+
+function layerItem(t, tree = LAYER_TREE) {
+  const item = extractEvidence(makeRepo(t, tree)).items['D7.page-object-usage'];
+  assert.ok(item, 'D7.page-object-usage must be emitted');
+  return item;
+}
+
+test('page-object-usage reports layered and inline tests over the whole suite', (t) => {
+  const item = layerItem(t);
+  assert.equal(item.evidenceClass, 'inferential');
+  assert.deepEqual(item.layeredTests, { count: 4, of: 7, share: 0.571 });
+  assert.deepEqual(item.inlineTests, { count: 2 });
+});
+
+test('page-object-usage classifies layer files and ignores node_modules', (t) => {
+  const item = layerItem(t);
+  assert.deepEqual(item.layers.files, ['fixtures/base.ts', 'helpers/data.ts', 'pages/LoginPage.ts']);
+  assert.deepEqual(item.layers.kinds, { pageObject: 1, fixture: 1, helper: 1 });
+});
+
+test('page-object-usage counts missing, aliased and pruned imports as unresolved', (t) => {
+  // Ghost (no such file), Aliased (tsconfig path alias) and PageDecoy (under node_modules).
+  assert.equal(layerItem(t).layers.unresolvedImports, 3);
+});
+
+test('page-object-usage reports test.extend declarations and the files that hold them', (t) => {
+  assert.deepEqual(layerItem(t).customFixtures, { count: 1, files: ['fixtures/base.ts'] });
+});
+
+test('page-object-usage classifies a class by file name and a plain module as helper', (t) => {
+  const item = layerItem(t, {
+    'playwright.config.ts': CONFIG,
+    'pages/LoginScreen.ts': 'export class LoginScreen { async open() {} }',
+    'pages/page-utils.ts': 'export function slug(s) { return s; }',
+    'tests/a.spec.ts': [
+      "import { LoginScreen } from '../pages/LoginScreen';",
+      "import { slug } from '../pages/page-utils';",
+      "test('x', async () => { await new LoginScreen().open(); slug('a'); });",
+    ].join('\n'),
+  });
+  assert.deepEqual(item.layers.kinds, { pageObject: 1, fixture: 0, helper: 1 });
+});
+
+test('page-object-usage resolves index files, .js specifiers for .ts sources and require()', (t) => {
+  const item = layerItem(t, {
+    'playwright.config.ts': CONFIG,
+    'pages/home/index.ts': 'export class Home { constructor(page) { this.page = page; } go() {} }',
+    'helpers/wait.ts': 'export function settle() {}',
+    'helpers/cjs.js': 'module.exports = { run() {} };',
+    'tests/a.spec.ts': [
+      "import { Home } from '../pages/home';",
+      "import { settle } from '../helpers/wait.js';",
+      "const cjs = require('../helpers/cjs');",
+      "test('x', async ({ page }) => { new Home(page).go(); settle(); cjs.run(); });",
+    ].join('\n'),
+  });
+  assert.deepEqual(item.layers.files, ['helpers/cjs.js', 'helpers/wait.ts', 'pages/home/index.ts']);
+  assert.equal(item.layers.unresolvedImports, 0);
+});
+
+test('page-object-usage counts test.extend declared in a test file and detects its fixtures', (t) => {
+  const item = layerItem(t, {
+    'playwright.config.ts': CONFIG,
+    'tests/a.spec.ts': [
+      "import { test as base } from '@playwright/test';",
+      'const test = base.extend({ admin: async ({ page }, use) => { await use(page); } });',
+      "test('x', async ({ admin }) => { await admin.goto('/'); });",
+    ].join('\n'),
+  });
+  assert.deepEqual(item.customFixtures, { count: 1, files: ['tests/a.spec.ts'] });
+  assert.equal(item.layeredTests.count, 1);
+  assert.deepEqual(item.layers.files, []);
+});
+
+test('page-object-usage never treats a test file importing another test file as a layer', (t) => {
+  const item = layerItem(t, {
+    'playwright.config.ts': CONFIG,
+    'tests/b.spec.ts': "test('b', async ({ page }) => { await page.goto('/'); });",
+    'tests/a.spec.ts': [
+      "import './b.spec';",
+      "test('a', async ({ page }) => { await page.goto('/'); });",
+    ].join('\n'),
+  });
+  assert.deepEqual(item.layers.files, []);
+  assert.deepEqual(item.layeredTests, { count: 0, of: 2, share: 0 });
+});
+
+test('page-object-usage is emitted with zero counts when the suite has no layers', (t) => {
+  const item = layerItem(t, { 'playwright.config.ts': CONFIG, 'tests/a.spec.ts': "test('x', async ({ page }) => { await page.goto('/'); });" });
+  assert.deepEqual(item, {
+    evidenceClass: 'inferential',
+    layeredTests: { count: 0, of: 1, share: 0 },
+    inlineTests: { count: 1 },
+    layers: { files: [], kinds: { pageObject: 0, fixture: 0, helper: 0 }, unresolvedImports: 0 },
+    customFixtures: { count: 0, files: [] },
+  });
+});
+
+test('page-object-usage is evidence only: no level, score, verdict or rating key', (t) => {
+  const json = JSON.stringify(layerItem(t));
+  for (const key of ['level', 'score', 'verdict', 'rating', 'threshold', 'cap', 'bound']) {
+    assert.ok(!json.includes(`"${key}"`), `evidence must not contain a ${key} key`);
+  }
+});
+
+test('per-test records carry a boolean layered flag, true for a delegated assertion without any import', (t) => {
+  const records = recordsFor(t, [
+    "test('p', async ({ page }) => { await verifyTitle(page); });",
+    "test('q', async ({ page }) => { await page.click('#a'); });",
+  ].join('\n'));
+  assert.deepEqual(records.map(r => r.layered), [true, false]);
+});
