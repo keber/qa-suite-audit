@@ -14,6 +14,12 @@
  *   severity carries the part status cannot: blocker for an eliminatory zero,
  *            critical for any other zero, normal below ceiling, trivial at it
  *
+ * The declared suite type (step 0) rides on every result as a `suiteType` label
+ * and a `suite type` parameter, so the dashboard can group or filter by it. A
+ * mixed suite's per-directory breakdown goes in environment.properties as
+ * suite.type.breakdown. It changes no status, severity or level: it is context
+ * for reading the dimensions, not an input to them.
+ *
  * Every result also carries the level, the ceiling and the reason for the
  * ceiling as parameters, because a green dimension sitting at 1 of 3 is not the
  * same thing as one at its ceiling and the dashboard would otherwise show them
@@ -35,6 +41,21 @@ const { buildModel } = require('./model.js');
 function id(...parts) {
   const hex = crypto.createHash('sha1').update(parts.join('|')).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+/**
+ * A value for environment.properties, escaped as a Java properties file reads
+ * it. Directory names come from the audited repository: a raw newline would end
+ * the entry and let the name forge another one. Backslash is escaped first so
+ * the escapes added below are not doubled.
+ */
+function propertyValue(value) {
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')
+    .replace(/[\u0000-\u001f\u007f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 function statusOf(d) {
@@ -74,6 +95,7 @@ function build(input, verdict, options = {}) {
       { name: 'reachable by evidence', value: String(d.evidenceMax) },
       { name: 'confidence', value: String(d.confidence ?? 'unknown') },
       { name: 'decided by', value: d.determined !== null ? 'evidence' : (d.decidedByCalibration ? 'calibrated threshold' : 'judgment') },
+      ...(m.suiteType ? [{ name: 'suite type', value: m.suiteType.type }] : []),
     ];
 
     const links = d.citations.map(c => ({ name: c, url: '', type: 'evidence' }));
@@ -113,6 +135,7 @@ function build(input, verdict, options = {}) {
         { name: 'feature',  value: d.name },
         { name: 'severity', value: severityOf(d) },
         { name: 'tag',      value: d.eliminatory ? 'eliminatory' : 'scored' },
+        ...(m.suiteType ? [{ name: 'suiteType', value: m.suiteType.type }] : []),
         ...(d.decidedByCalibration ? [{ name: 'tag', value: 'calibrated-threshold' }] : []),
         ...(d.confidence === 'low' ? [{ name: 'tag', value: 'low-confidence' }] : []),
       ],
@@ -150,6 +173,12 @@ function build(input, verdict, options = {}) {
     `score=${m.obtained}/${m.attainable}`,
     `reachable.by.evidence=${m.evidenceMaximum}`,
     `eliminated=${m.eliminated}`,
+    ...(m.suiteType ? [
+      `suite.type=${propertyValue(m.suiteType.type)}`,
+      ...(m.suiteType.byDirectory.length
+        ? [`suite.type.breakdown=${propertyValue(m.suiteType.byDirectory.map(e => `${e.directory}=${e.type}`).join('; '))}`]
+        : []),
+    ] : []),
     `source.rubric.bands.applied=false`,
     `scope=repository evidence only; no run history, no CI policy`,
   ].join('\n');

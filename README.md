@@ -85,6 +85,7 @@ than publishing nothing.
 | `src/extract-pipelines.js` | CI definitions, identified by content rather than by path |
 | `src/extract-mutation.js` | mutation testing tooling (Stryker, mutmut, PIT, infection), identified by content and config names |
 | `src/adapters/` | **the only methodology-specific code**: how rules and cases are written down |
+| `src/suite-type.js` | `D0.suite-type-signals`: per-directory signals for step 0 (signals only; the verdict declares the type) |
 | `src/traceability.js` | the rule-to-test join, identical for every adapter |
 | `src/judge-prep.js` | applies the thresholds and bounds what is left to judge |
 | `src/validate-verdict.js` | checks a verdict against its evidence |

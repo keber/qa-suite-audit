@@ -55,7 +55,9 @@ function verdict(overrides = {}) {
     { dimension: 7, level: 1, confidence: 'medium', citations: ['D7.selector-mix'], observations: [], reasoning: REASON },
   ];
   return {
-    schema: 'verdict/v1', repo: 'demo-repo', evidenceDigest: DIGEST, levels,
+    schema: 'verdict/v2', repo: 'demo-repo', evidenceDigest: DIGEST,
+    suiteType: { type: 'regression', citations: ['D0.suite-type-signals'], reasoning: REASON },
+    levels,
     obtained: levels.reduce((n, l) => n + l.level, 0), attainable: 16,
     eliminated: true, eliminatedBy: [1, 2], thresholdObjections: [], notes: '',
     ...overrides,
@@ -243,4 +245,119 @@ test('a risk register is reported next to the score, never folded into it', (t) 
   assert.match(page, /3 of 20 risks/);
   assert.match(page, /inferential/);
   assert.match(page, /Counted apart from rule coverage/);
+});
+
+// ---------------------------------------------------------------------------
+// Suite type (step 0)
+// ---------------------------------------------------------------------------
+
+const MIXED = {
+  type: 'mixed',
+  byDirectory: { './legacy': 'defect-harness', './api': 'regression' },
+  citations: ['D0.suite-type-signals'],
+  reasoning: REASON,
+};
+
+function resultsOf(files) {
+  return files.filter(f => f.name.endsWith('-result.json')).map(f => JSON.parse(f.body));
+}
+
+test('the model carries the suite type and a sorted per-directory breakdown', () => {
+  assert.equal(buildModel(INPUT, verdict()).suiteType.type, 'regression');
+  assert.deepEqual(buildModel(INPUT, verdict()).suiteType.byDirectory, []);
+
+  const m = buildModel(INPUT, verdict({ suiteType: MIXED }));
+  assert.equal(m.suiteType.type, 'mixed');
+  assert.deepEqual(m.suiteType.byDirectory, [
+    { directory: './api', type: 'regression' },
+    { directory: './legacy', type: 'defect-harness' },
+  ]);
+});
+
+test('the model tolerates a verdict with no suite type', () => {
+  const v = verdict();
+  delete v.suiteType;
+  assert.equal(buildModel(INPUT, v).suiteType, null);
+});
+
+test('the terminal report shows the suite type above the result', () => {
+  const lines = list.render(INPUT, verdict()).split('\n');
+  const at = lines.findIndex(l => /suite type\s+regression/.test(l));
+  const result = lines.findIndex(l => /RESULT/.test(l));
+
+  assert.ok(at !== -1, 'suite type line missing');
+  assert.ok(at < result, 'it belongs near the top, before the result');
+});
+
+test('the terminal report lists the breakdown when mixed', () => {
+  const text = list.render(INPUT, verdict({ suiteType: MIXED }));
+  assert.match(text, /suite type\s+mixed/);
+  assert.match(text, /\.\/api\s+regression/);
+  assert.match(text, /\.\/legacy\s+defect-harness/);
+});
+
+test('the html report shows the suite type and escapes the breakdown', () => {
+  assert.match(html.render(INPUT, verdict()), /suite type[\s\S]{0,80}regression/);
+
+  const page = html.render(INPUT, verdict({ suiteType: { ...MIXED, byDirectory: { '<b>x</b>': 'regression' } } }));
+  assert.match(page, /mixed/);
+  assert.ok(!page.includes('<b>x</b>'), 'directory names come from a repository and must be escaped');
+  assert.match(page, /&lt;b&gt;x&lt;\/b&gt;/);
+});
+
+test('every allure result carries the suite type as a label and a parameter', () => {
+  for (const r of resultsOf(allure.build(INPUT, verdict({ suiteType: MIXED }), { timestamp: 1 }))) {
+    assert.equal(r.labels.find(l => l.name === 'suiteType').value, 'mixed', r.name);
+    assert.equal(r.parameters.find(p => p.name === 'suite type').value, 'mixed', r.name);
+  }
+});
+
+test('the allure environment records the suite type and the breakdown', () => {
+  const env = allure.build(INPUT, verdict({ suiteType: MIXED }), { timestamp: 1 })
+    .find(f => f.name === 'environment.properties').body;
+
+  assert.match(env, /suite\.type=mixed/);
+  assert.match(env, /suite\.type\.breakdown=\.\/api=regression; \.\/legacy=defect-harness/);
+});
+
+test('the suite type changes no level, status or severity in any renderer', () => {
+  const sev = (suiteType) => resultsOf(allure.build(INPUT, verdict({ suiteType }), { timestamp: 1 }))
+    .map(r => [r.name, r.status, r.labels.find(l => l.name === 'severity').value]);
+  const types = [{ ...MIXED }, { type: 'defect-harness', citations: [], reasoning: REASON }];
+
+  assert.deepEqual(sev(types[0]), sev(types[1]));
+  assert.equal(buildModel(INPUT, verdict({ suiteType: types[0] })).obtained, buildModel(INPUT, verdict({ suiteType: types[1] })).obtained);
+});
+
+// ---------------------------------------------------------------------------
+// Repository-controlled directory names
+// ---------------------------------------------------------------------------
+
+const HOSTILE = {
+  type: 'mixed',
+  byDirectory: { './evil\nINJECT=1': 'regression', './ansi\u001b[31mRED\u001b[0m\u0007bell': 'defect-harness' },
+  citations: ['D0.suite-type-signals'],
+  reasoning: REASON,
+};
+
+test('the terminal report strips control and ANSI characters from directory names', () => {
+  const text = list.render(INPUT, verdict({ suiteType: HOSTILE }));
+
+  assert.ok(!text.includes('\u001b'), 'no escape character may reach the terminal');
+  assert.ok(!text.includes('\u0007'), 'no bell');
+  assert.ok(!text.split('\n').some(l => l.startsWith('INJECT')), 'a newline in a name must not start a line');
+  assert.match(text, /evilINJECT=1\s+regression/);
+  assert.match(text, /ansiREDbell\s+defect-harness/);
+});
+
+test('allure environment properties escape directory names so one entry stays one line', () => {
+  const env = allure.build(INPUT, verdict({ suiteType: HOSTILE }), { timestamp: 1 })
+    .find(f => f.name === 'environment.properties').body;
+
+  const lines = env.split('\n').filter(Boolean);
+  assert.ok(!lines.some(l => l.startsWith('INJECT')), 'a newline in a name must not forge an entry');
+  assert.equal(lines.filter(l => l.startsWith('suite.type.breakdown=')).length, 1);
+  assert.ok(!/[\u0000-\u0009\u000b-\u001f\u007f]/.test(env), 'no raw control character');
+  assert.match(env, /evil\\nINJECT=1=regression/);
+  assert.match(env, /\\u001b\[31mRED/);
 });

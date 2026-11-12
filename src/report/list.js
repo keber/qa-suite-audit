@@ -28,6 +28,12 @@ function render(input, verdict, options = {}) {
 
   w(`Suite audit  ${m.repo}`);
   w(`  adapter ${m.adapter.name}   evidence ${m.shortDigest}   ${m.suiteFiles} test file(s)`);
+  if (m.suiteType) {
+    w(`  suite type ${printable(m.suiteType.type)}`);
+    const rows = m.suiteType.byDirectory.map(e => ({ directory: printable(e.directory), type: printable(e.type) }));
+    const width = Math.max(0, ...rows.map(e => e.directory.length));
+    for (const e of rows) w(`    ${e.directory.padEnd(width)}  ${e.type}`);
+  }
   w('');
 
   // -- Headline -------------------------------------------------------------
@@ -103,6 +109,19 @@ function render(input, verdict, options = {}) {
   }
 
   return out.join('\n');
+}
+
+/**
+ * A directory name comes from the audited repository and goes to a terminal, so
+ * it is stripped of anything a terminal would act on: ANSI escape sequences
+ * first (so their printable tail does not survive), then every remaining
+ * control character, which also removes a newline that could forge a line.
+ */
+const ANSI_SEQUENCE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-Z\\-_])/g;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
+function printable(text) {
+  return String(text).replace(ANSI_SEQUENCE, '').replace(CONTROL_CHARS, '');
 }
 
 function wrap(text, width, indent) {

@@ -62,6 +62,37 @@ source rubric's verdict bands: they were calibrated for complete evidence.
 
 ---
 
+## D0 - Suite type
+
+> What kind of suite this is, before anything is scored. Not a dimension: it has
+> no level, no ceiling and no weight in the total.
+
+| Item | Measures | Extraction |
+|---|---|---|
+| `D0.suite-type-signals` | per suite and per top-level test directory (the first path segment under the suite's resolved test root; files directly in the root group as `.`), as `suites[].directories[]` each with a `key` (`<suite id>/<directory>`, e.g. `./legacy`): `tests`; `defectIds` (`count` of tests whose title or file name carries a defect id, and up to five `examples` as `file:line`); `expectedFailures.count` (tests with `test.fail`, the same reading as `D2.expected-failures`); `snapshotAssertions.count` (tests asserting through `toMatchSnapshot(`, `toHaveScreenshot(`, `toMatchAriaSnapshot(` or `toMatchInlineSnapshot(` in their masked body); `caseIds.count` (tests whose title carries a case id); `caseIdsLinkedToRules.count` (those whose case id the specification links to a declared rule). Every count is a number of tests, skipped ones included. **Inferential** | `DEFECT_ID` in `src/suite-type.js`: `/\b(?:DEF\|BUG\|DEFECT\|ISSUE\|INC\|HOTFIX)[-_][A-Z0-9-]*\d+\b/i`, read over titles and file base names (a defect id is not a case id: `TC-CON-001` names a scenario, `BUG-0042` names a known defect); per-test counts from `extractFile`; case-to-rule link from `linkedCaseIds` in `src/traceability.js`, after the adapter |
+
+**Group keys.** A group's `key` is `<suite id>/<directory>`. The suite id is the
+repository-relative folder of the runner config, and `.` when the config sits at
+the repository root, so a root suite's directories read `./legacy`, `./api`, and
+files directly in the test root give `./.` (suite `.`, directory `.`). A suite
+in `a/` with a `tests/e2e` folder gives `a/e2e`. A verdict copies keys verbatim.
+
+**Signals only.** The scripts never say which kind of suite this is, and the item
+carries no type or classification. The verdict declares `suiteType`
+(`regression`, `defect-harness`, `characterization` or `mixed`, with a
+per-directory breakdown for `mixed`) and must cite `D0.suite-type-signals`; the
+validator checks it is declared, cited and, for `mixed`, covers every `key`
+above. No bound reads this item: the suite type changes how a judge reads D1 and
+D5, not where any ceiling, cap or floor sits (issue #10 is open on purpose).
+
+**Reading it.** Defect ids and expected failures in a directory suggest a pinned
+defect harness; snapshot assertions with few linked case ids suggest
+characterization; many case ids linked to rules suggest a regression net. These
+are readings for the judge, not rules: a title can name a defect it merely
+regression-tests, and a missing id is not proof of its absence.
+
+---
+
 ## D1 - Oracle
 
 > Where does "correct" come from.

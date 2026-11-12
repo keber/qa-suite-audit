@@ -14,6 +14,8 @@
  *   overridden a level the evidence settled was changed anyway
  *   arithmetic the total does not equal the levels, or the eliminatory rule
  *             was not applied
+ *   suite-type step 0 is missing, invalid, uncited or has no breakdown when
+ *             mixed. It is checked for being declared, never read by a bound
  *
  * Every one of those is a real failure mode of a generated verdict, and every
  * one of them produces a document that looks exactly as authoritative as a
@@ -30,9 +32,14 @@
 const fs   = require('fs');
 const path = require('path');
 
+const { groupKeys } = require('./suite-type.js');
+
 const CONFIDENCE = new Set(['high', 'medium', 'low']);
 const OBSERVATION = /^(.+?):(\d+)$/;
 const MIN_REASONING = 40;
+const BREAKDOWN_TYPES = new Set(['regression', 'defect-harness', 'characterization']);
+const SUITE_TYPES = new Set([...BREAKDOWN_TYPES, 'mixed']);
+const SUITE_SIGNALS = 'D0.suite-type-signals';
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -46,8 +53,15 @@ function validate(input, verdict) {
 
   // -- Identity -------------------------------------------------------------
 
-  if (verdict.schema !== 'verdict/v1') {
-    fail('schema', `expected schema verdict/v1, got ${JSON.stringify(verdict.schema)}`);
+  // v1 verdicts were judged without step 0. Adding a suiteType to one would
+  // attach a classification nobody made against the evidence, so they are
+  // rejected outright and the rest of the checks are not run on them.
+  if (verdict.schema === 'verdict/v1') {
+    fail('schema', 'verdict/v1 verdicts predate suite type and must be re-judged against the current evidence, not migrated');
+    return report(errors, warnings, null);
+  }
+  if (verdict.schema !== 'verdict/v2') {
+    fail('schema', `expected schema verdict/v2, got ${JSON.stringify(verdict.schema)}`);
   }
 
   if (verdict.repo !== input.repo) {
@@ -180,6 +194,12 @@ function validate(input, verdict) {
     }
   }
 
+  // -- Suite type (step 0) ----------------------------------------------------
+  // Checked for being declared, cited and coherent. Nothing below reads it: the
+  // bounds, the total and the elimination rule are computed without it.
+
+  checkSuiteType(input, verdict.suiteType, knownItems, fail);
+
   // -- Arithmetic -----------------------------------------------------------
 
   const sum = [...seen.values()].reduce((n, e) => n + (Number.isInteger(e.level) ? e.level : 0), 0);
@@ -220,6 +240,70 @@ function validate(input, verdict) {
   }
 
   return report(errors, warnings, { obtained: sum, attainable: input.attainable, eliminated: zeroed.length > 0 });
+}
+
+function checkSuiteType(input, st, knownItems, fail) {
+  // Evidence from before step 0 has no signals to cite. Saying the citation is
+  // fabricated or uncited would blame the verdict for a stale input.
+  if (!input.items?.source?.[SUITE_SIGNALS]) {
+    fail('evidence-outdated',
+      `the judgment input has no ${SUITE_SIGNALS}; regenerate the evidence with the current version before judging or validating`);
+    return;
+  }
+
+  if (!st || typeof st !== 'object' || Array.isArray(st)) {
+    fail('suite-type-missing', 'the verdict declares no suiteType; step 0 must be answered before any level');
+    return;
+  }
+
+  const valid = SUITE_TYPES.has(st.type);
+  if (!valid) {
+    fail('suite-type-invalid',
+      `suiteType.type ${JSON.stringify(st.type)} is not one of ${[...SUITE_TYPES].join(', ')}`);
+  }
+
+  const citations = Array.isArray(st.citations) ? st.citations : [];
+  for (const c of citations) {
+    if (!knownItems.has(c)) fail('fabricated-item', `suiteType cites item ${JSON.stringify(c)}, which does not exist`);
+  }
+  if (!citations.includes(SUITE_SIGNALS)) {
+    fail('suite-type-uncited', `suiteType must cite ${SUITE_SIGNALS}: the declaration is a reading of those signals`);
+  }
+
+  const reasoning = typeof st.reasoning === 'string' ? st.reasoning.trim() : '';
+  if (reasoning.length < MIN_REASONING) {
+    fail('thin-reasoning', `suiteType reasoning is ${reasoning.length} characters; a classification needs an argument, not a label`);
+  }
+
+  if (!valid) return;
+
+  const carries = st.byDirectory !== undefined;
+  if (st.type !== 'mixed') {
+    if (carries) fail('suite-type-mixed-breakdown', `suiteType ${st.type} must not carry byDirectory; only mixed has a breakdown`);
+    return;
+  }
+
+  const by = st.byDirectory;
+  if (!by || typeof by !== 'object' || Array.isArray(by)) {
+    fail('suite-type-mixed-breakdown', 'suiteType mixed requires byDirectory, one entry per directory group in the signals');
+    return;
+  }
+
+  const groups = groupKeys(input.items.source[SUITE_SIGNALS]);
+
+  const missing = groups.filter(k => !Object.hasOwn(by, k));
+  if (missing.length) {
+    fail('suite-type-mixed-breakdown', `byDirectory does not cover every group; missing ${missing.join(', ')}`);
+  }
+  const unknown = Object.keys(by).filter(k => !groups.includes(k));
+  if (unknown.length) {
+    fail('suite-type-mixed-breakdown', `byDirectory names groups the signals do not have: ${unknown.join(', ')}`);
+  }
+  for (const [k, v] of Object.entries(by)) {
+    if (!BREAKDOWN_TYPES.has(v)) {
+      fail('suite-type-mixed-breakdown', `byDirectory ${JSON.stringify(k)} is ${JSON.stringify(v)}; each entry must be one of ${[...BREAKDOWN_TYPES].join(', ')}`);
+    }
+  }
 }
 
 function report(errors, warnings, summary) {
