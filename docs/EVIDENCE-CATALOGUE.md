@@ -43,7 +43,7 @@ A level the repository cannot witness is not scored. It is declared unreachable.
 | # | Dimension | Ceiling | Binding constraint |
 |---|---|---|---|
 | 1 | Oracle | 3 | needs a rule inventory in-repo (drops to 1 without one) |
-| 2 | Sensitivity | 3 | level 3 needs mutation evidence committed (not yet extracted, issue #2) |
+| 2 | Sensitivity | 3 | level 3 needs measured sensitivity; capped at 2 when no mutation config is committed (calibrated, see D2) |
 | 3 | Determinism | 2 | level 3 asserts run behavior, not source state |
 | 4 | Diagnosis | 3 | - |
 | 5 | Business rule coverage | **2** | level 3 needs the deliberate exclusions written down (drops to 1 without a rule inventory) |
@@ -105,6 +105,7 @@ are never conflated.
 | `D2.expected-failures` | `test.fail(...)`, which inverts the meaning of green | body scan |
 | `D2.soft-assertions` | `expect.soft` usage, which downgrades failure to warning | regex |
 | `D2.only-markers` | tests declared `test.only` or `describe.only`; a committed `only` silences every other test in its scope | declaration scan |
+| `D2.mutation-config` | mutation testing tooling configured in the repository: `{ count, tools: [{ tool, file, via }] }`; repository level, not per suite | config file names and manifest content: Stryker, Stryker.NET, mutmut, PIT, infection |
 
 **Assertion proxies.** A suite that layers assertions behind page objects has
 tests whose bodies contain no `expect(`. Counting those as assertless accuses the
@@ -119,11 +120,29 @@ runner reports a *passing* test as a failure. Such a test cannot go red for the
 behavior it names, and it is neither skipped nor asserting, so it is counted on
 its own.
 
+**Mutation config.** Identified by well-known config file names (`stryker.conf.*`,
+`stryker.config.*`, `.stryker.conf*`, `stryker-config.json` for Stryker.NET,
+`infection.json`, `infection.json5`, `infection.json.dist`) or by what a manifest
+declares: an `@stryker-mutator/*` entry in a `package.json` dependency section, a
+`[mutmut]` section in `setup.cfg` or `[tool.mutmut]` in `pyproject.toml`, `pitest-maven`
+or `org.pitest` in `pom.xml`, the `info.solidsoft.pitest` or `pitest` plugin in a Gradle
+build. Commented-out declarations do not count. The walk prunes the same
+directories as suite resolution (`node_modules`, `dist`, `.claude`, ...), so a tool's
+own files cannot pass as this repository's configuration. `via` says how the tool
+was recognised: `config-file`, `dependency`, `config-section` or `build-plugin`.
+
 **Discriminates:** level 0 mechanically, from `D2.assertless-tests` plus
-`D2.weak-assertions`. The source rubric ties level 3 to mutation evidence, but
-`D2.mutation-config` is not extracted yet (issue #2), so that rule is not
-enforced: no script or validator rejects a level 3 for lacking it, and the
-ceiling of 3 is a statement about what the repository could witness, not a check.
+`D2.weak-assertions`, and a cap at 2 when `D2.mutation-config.count` is 0
+(threshold `D2.sensitivity-measured`). That cap is a **calibration**, not a literal
+reading, because the rubric's level 3 is a disjunction: "se probó rompiendo la regla
+a propósito, o hay mutation testing corriendo". Mutation config is repository
+evidence for the second half only. A rule broken on purpose to watch the test fail
+leaves no trace v1 can read, so the cap can wrongly hold back a suite verified that
+way. In the other direction, config present does not prove mutation testing is
+running: it lifts the cap, nothing more. Level 3 is never floored or settled by this
+item and still has to be argued by the judge, citing `D2.mutation-config` and what the
+configuration shows. When both this cap and the systemic assertless cap apply, the
+lower one (0) wins.
 
 **Left to judgment:** 1 vs 2 - whether a test fails for causes unrelated to what
 it claims to protect. Needs reading the test.
@@ -254,7 +273,6 @@ that makes the extractor emit it.
 | Item | Would measure | Why not extracted |
 |---|---|---|
 | `D1.assert-literals` | expected values that are hardcoded literals vs derived from fixtures | needs an expression-level parse of `expect(...)` arguments; the extractor is a masked-text scanner |
-| `D2.mutation-config` | mutation testing configured (Stryker et al.) | dependency and config file scan not written; scheduled in issue #2 |
 | `D3.committed-run-artifacts` | run reports versioned in-repo that would let flakiness be measured | no committed-report scan exists |
 | `D3.order-coupling` | tests referencing state produced by a previous test in the file | needs data-flow reading; at best an inferential heuristic, not attempted |
 | `D3.shared-state` | module-level mutable bindings in test files | needs scope tracking outside test bodies; not written |

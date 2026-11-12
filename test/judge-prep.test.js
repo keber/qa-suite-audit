@@ -154,14 +154,70 @@ test('every dimension states why its ceiling is where it is', (t) => {
 // Caps from evidence
 // ---------------------------------------------------------------------------
 
+const WITH_MUTATION = (spec) => ({
+  ...FULL_REPO(spec),
+  'stryker.conf.json': '{}',
+});
+
 test('an isolated assertless test does not cap sensitivity', (t) => {
   // 1 in 100 is a finding to fix, not a characteristic of the suite. The test
-  // is still reported individually by file and line.
-  const root = makeRepo(t, FULL_REPO(specFile(100, 1)));
+  // is still reported individually by file and line. Mutation config is present
+  // so that the separate level 3 cap does not mask what this test is about.
+  const root = makeRepo(t, WITH_MUTATION(specFile(100, 1)));
   const r = prepare(root);
 
   assert.equal(dim(r, 2).bounds.max, 3, 'sensitivity stays open');
   assert.equal(r.items.source['D2.assertless-tests'].count, 1, 'but the test is still named');
+});
+
+test('no mutation config caps sensitivity at 2, as a calibration', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(100, 1)));
+  const r = prepare(root);
+  const d2 = dim(r, 2);
+
+  assert.equal(r.items.source['D2.mutation-config'].count, 0);
+  assert.equal(d2.bounds.max, 2);
+  assert.equal(d2.determined, null, 'the cap never settles the dimension');
+  assert.equal(d2.bounds.min, 0, 'and it is never floored');
+  assert.equal(d2.ceiling, 3, 'the structural ceiling is unchanged; the cap is evidence-driven');
+
+  const c = d2.constraints.find(x => x.threshold === 'D2.sensitivity-measured');
+  assert.ok(c, 'the constraint must show in the report');
+  assert.equal(c.kind, 'calibration', 'the rubric level is a disjunction, so this is a choice');
+});
+
+test('mutation config lifts the cap but does not floor or settle level 3', (t) => {
+  const root = makeRepo(t, WITH_MUTATION(specFile(100, 0)));
+  const r = prepare(root);
+  const d2 = dim(r, 2);
+
+  assert.equal(r.items.source['D2.mutation-config'].count, 1);
+  assert.equal(d2.bounds.max, 3);
+  assert.equal(d2.bounds.min, 0);
+  assert.equal(d2.determined, null, 'config present does not prove mutation testing is running');
+  assert.ok(!d2.constraints.some(x => x.threshold === 'D2.sensitivity-measured'));
+  assert.ok(d2.question, 'level 3 is still argued by the judge');
+});
+
+test('the systemic assertless cap at 0 wins over the mutation cap', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(100, 10)));
+  const d2 = dim(prepare(root), 2);
+
+  assert.equal(d2.determined, 0);
+  assert.equal(d2.bounds.max, 0);
+  assert.ok(d2.constraints.some(x => x.threshold === 'D2.systemic-assertless'));
+  assert.ok(d2.constraints.some(x => x.threshold === 'D2.sensitivity-measured'),
+    'both applied; the lower cap decides');
+});
+
+test('a decoy mutation config in node_modules does not lift the cap', (t) => {
+  const root = makeRepo(t, { ...FULL_REPO(specFile(10, 0)), 'node_modules/dep/stryker.conf.json': '{}' });
+  assert.equal(dim(prepare(root), 2).bounds.max, 2);
+});
+
+test('D2 answers must be able to cite the mutation evidence', (t) => {
+  const root = makeRepo(t, FULL_REPO(specFile(10, 0)));
+  assert.ok(dim(prepare(root), 2).mustCite.includes('D2.mutation-config'));
 });
 
 test('systemically assertless tests cap sensitivity at zero', (t) => {
