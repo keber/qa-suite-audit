@@ -55,6 +55,10 @@ function buildModel(input, verdict) {
   return {
     repo: input.repo,
     adapter: input.adapter ?? { name: 'unknown' },
+    // Declared by the judge and shown as declared. It is context for reading the
+    // dimensions below, not an input to any of them: nothing here is computed
+    // from it.
+    suiteType: suiteTypeSummary(verdict.suiteType),
     digest: input.evidenceDigest,
     shortDigest: String(input.evidenceDigest).slice(0, 12),
     obtained: verdict.obtained,
@@ -70,6 +74,18 @@ function buildModel(input, verdict) {
     risks: riskSummary(input),
     suiteFiles: (input.suiteFiles ?? []).length,
     items: input.items,
+  };
+}
+
+/** The declared suite type with its breakdown sorted, so every renderer lists it alike. */
+function suiteTypeSummary(st) {
+  if (!st || typeof st.type !== 'string') return null;
+
+  return {
+    type: st.type,
+    byDirectory: Object.entries(st.byDirectory ?? {})
+      .map(([directory, type]) => ({ directory, type }))
+      .sort((a, b) => a.directory.localeCompare(b.directory)),
   };
 }
 

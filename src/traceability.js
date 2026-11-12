@@ -74,6 +74,20 @@ function tally(values) {
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
 }
 
+/**
+ * Case ids the specification links to at least one DECLARED rule, upper-cased.
+ *
+ * Kept next to the join so "linked" means one thing everywhere. It reads the
+ * adapter output only and feeds no coverage figure: D5.covered-rules is still
+ * computed by buildItems, untouched.
+ */
+function linkedCaseIds(specs) {
+  const declared = new Set(specs.rules.map(r => r.id));
+  return new Set(specs.cases
+    .filter(c => c.refs.some(r => declared.has(r)))
+    .map(c => c.id.toUpperCase()));
+}
+
 function buildItems(specs, automatedCaseIds, riskReferences) {
   const declaredRuleIds = new Set(specs.rules.map(r => r.id));
 
@@ -128,4 +142,4 @@ function buildItems(specs, automatedCaseIds, riskReferences) {
   };
 }
 
-module.exports = { buildItems };
+module.exports = { buildItems, linkedCaseIds };

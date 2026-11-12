@@ -35,7 +35,18 @@ const INPUT = {
     { dimension: 7, name: 'Maintainability', eliminatory: false, ceiling: 2, bounds: { min: 0, max: 2 }, determined: null, constraints: [], mustCite: ['D7.selector-mix'], question: 'q' },
   ],
   items: {
-    source: { 'D2.assertless-tests': {}, 'D3.fixed-waits': {}, 'D4.failure-context': {}, 'D7.selector-mix': {} },
+    source: {
+      'D2.assertless-tests': {}, 'D3.fixed-waits': {}, 'D4.failure-context': {}, 'D7.selector-mix': {},
+      'D0.suite-type-signals': {
+        suites: [{
+          suite: '.', testDir: 'tests',
+          directories: [
+            { directory: 'api', key: './api', tests: 3 },
+            { directory: 'legacy', key: './legacy', tests: 5 },
+          ],
+        }],
+      },
+    },
     rules: { 'D1.spec-linkage': {}, 'D5.covered-rules': {} },
     pipelines: { 'D6.suite-invocation': {}, 'D6.pipeline-present': {} },
   },
@@ -65,9 +76,14 @@ function goodVerdict(mutate = (v) => v) {
     level(6, { level: 1 }), level(7),
   ];
   const verdict = {
-    schema: 'verdict/v1',
+    schema: 'verdict/v2',
     repo: 'demo',
     evidenceDigest: DIGEST,
+    suiteType: {
+      type: 'regression',
+      citations: ['D0.suite-type-signals'],
+      reasoning: 'No defect ids and no expected failures in any directory; expected values come from the rule catalogue.',
+    },
     levels,
     obtained: levels.reduce((n, l) => n + l.level, 0),
     attainable: 16,
@@ -316,4 +332,145 @@ test('a verdict may cite the risk register it read', (t) => {
   }));
 
   assert.equal(result.valid, true, JSON.stringify(result.errors));
+});
+
+// ---------------------------------------------------------------------------
+// Suite type (step 0, verdict/v2)
+// ---------------------------------------------------------------------------
+
+const SIGNALS = 'D0.suite-type-signals';
+const SUITE_REASON = 'The legacy directory is full of defect ids; the api directory derives its values from the rules.';
+
+test('a verdict/v1 verdict is rejected as predating suite type, not migrated', () => {
+  const result = validate(INPUT, goodVerdict(v => { v.schema = 'verdict/v1'; delete v.suiteType; }));
+
+  assert.equal(result.valid, false);
+  const err = result.errors.find(e => e.code === 'schema');
+  assert.ok(err, JSON.stringify(result.errors));
+  assert.match(err.message, /predate suite type/);
+  assert.match(err.message, /re-judged/);
+  assert.match(err.message, /not migrated/);
+});
+
+test('an unknown schema is still a schema error', () => {
+  const result = validate(INPUT, goodVerdict(v => { v.schema = 'verdict/v9'; }));
+  assert.ok(codes(result).includes('schema'));
+});
+
+test('a verdict without suiteType is caught', () => {
+  const result = validate(INPUT, goodVerdict(v => { delete v.suiteType; }));
+  assert.deepEqual(codes(result), ['suite-type-missing']);
+});
+
+test('a suite type outside the four values is caught', () => {
+  const result = validate(INPUT, goodVerdict(v => { v.suiteType.type = 'smoke'; }));
+  assert.ok(codes(result).includes('suite-type-invalid'));
+});
+
+test('a suite type that does not cite the signals is caught', () => {
+  const result = validate(INPUT, goodVerdict(v => { v.suiteType.citations = ['D2.assertless-tests']; }));
+  assert.ok(codes(result).includes('suite-type-uncited'));
+});
+
+test('a suite type with no citations at all is caught', () => {
+  const result = validate(INPUT, goodVerdict(v => { delete v.suiteType.citations; }));
+  assert.ok(codes(result).includes('suite-type-uncited'));
+});
+
+test('a suite type citing an item that does not exist is a fabricated citation', () => {
+  const result = validate(INPUT, goodVerdict(v => { v.suiteType.citations = [SIGNALS, 'D0.invented']; }));
+  const err = result.errors.find(e => e.code === 'fabricated-item');
+  assert.ok(err);
+  assert.match(err.message, /D0\.invented/);
+});
+
+test('suite type reasoning keeps the same minimum as a level', () => {
+  const result = validate(INPUT, goodVerdict(v => { v.suiteType.reasoning = 'Regression.'; }));
+  assert.ok(codes(result).includes('thin-reasoning'));
+});
+
+test('mixed must break down every group in the signals', () => {
+  const ok = validate(INPUT, goodVerdict(v => {
+    v.suiteType = { type: 'mixed', byDirectory: { './api': 'regression', './legacy': 'defect-harness' }, citations: [SIGNALS], reasoning: SUITE_REASON };
+  }));
+  assert.equal(ok.valid, true, JSON.stringify(ok.errors));
+
+  const missing = validate(INPUT, goodVerdict(v => {
+    v.suiteType = { type: 'mixed', byDirectory: { './api': 'regression' }, citations: [SIGNALS], reasoning: SUITE_REASON };
+  }));
+  assert.ok(codes(missing).includes('suite-type-mixed-breakdown'));
+  assert.match(missing.errors.find(e => e.code === 'suite-type-mixed-breakdown').message, /\.\/legacy/);
+
+  const none = validate(INPUT, goodVerdict(v => {
+    v.suiteType = { type: 'mixed', citations: [SIGNALS], reasoning: SUITE_REASON };
+  }));
+  assert.ok(codes(none).includes('suite-type-mixed-breakdown'));
+});
+
+test('a mixed breakdown value must be one of the three non-mixed types', () => {
+  for (const bad of ['mixed', 'smoke']) {
+    const result = validate(INPUT, goodVerdict(v => {
+      v.suiteType = { type: 'mixed', byDirectory: { './api': 'regression', './legacy': bad }, citations: [SIGNALS], reasoning: SUITE_REASON };
+    }));
+    assert.ok(codes(result).includes('suite-type-mixed-breakdown'), bad);
+  }
+});
+
+test('a mixed breakdown may not name a group the signals do not have', () => {
+  const result = validate(INPUT, goodVerdict(v => {
+    v.suiteType = { type: 'mixed', byDirectory: { './api': 'regression', './legacy': 'characterization', './ghost': 'regression' }, citations: [SIGNALS], reasoning: SUITE_REASON };
+  }));
+  assert.ok(codes(result).includes('suite-type-mixed-breakdown'));
+});
+
+test('a non-mixed suite type must not carry a breakdown', () => {
+  const result = validate(INPUT, goodVerdict(v => { v.suiteType.byDirectory = { './api': 'regression', './legacy': 'regression' }; }));
+  assert.ok(codes(result).includes('suite-type-mixed-breakdown'));
+});
+
+test('the suite type moves no bound, total or elimination', () => {
+  // Issue #10 is open on purpose: a ceiling the judge can raise by declaring
+  // something is not a bound. The same levels must validate identically
+  // whatever type is declared.
+  const declare = {
+    regression: { type: 'regression' },
+    'defect-harness': { type: 'defect-harness' },
+    characterization: { type: 'characterization' },
+    mixed: { type: 'mixed', byDirectory: { './api': 'regression', './legacy': 'defect-harness' } },
+  };
+  const runs = Object.entries(declare).map(([name, st]) => validate(INPUT, goodVerdict(v => {
+    v.suiteType = { ...st, citations: [SIGNALS], reasoning: SUITE_REASON };
+  })));
+
+  for (const r of runs) assert.equal(r.valid, true, JSON.stringify(r.errors));
+  for (const r of runs.slice(1)) assert.deepEqual(r, runs[0]);
+
+  // And a level the evidence forbids stays forbidden under every type.
+  for (const [name, st] of Object.entries(declare)) {
+    const r = validate(INPUT, goodVerdict(v => {
+      v.suiteType = { ...st, citations: [SIGNALS], reasoning: SUITE_REASON };
+      v.levels[2].level = 2; v.obtained = 8;
+    }));
+    assert.ok(codes(r).includes('out-of-bounds'), name);
+  }
+});
+
+test('evidence without the D0 item says to regenerate it, not that the citation is fabricated', () => {
+  const { 'D0.suite-type-signals': _gone, ...source } = INPUT.items.source;
+  const outdated = { ...INPUT, items: { ...INPUT.items, source } };
+
+  const result = validate(outdated, goodVerdict());
+  assert.ok(codes(result).includes('evidence-outdated'), JSON.stringify(result.errors));
+  assert.match(result.errors.find(e => e.code === 'evidence-outdated').message, /regenerate the evidence/);
+  for (const misleading of ['fabricated-item', 'suite-type-uncited', 'suite-type-missing', 'suite-type-mixed-breakdown']) {
+    assert.ok(!codes(result).includes(misleading), `${misleading} would mislead`);
+  }
+});
+
+test('evidence without the D0 item is outdated even for a mixed declaration', () => {
+  const { 'D0.suite-type-signals': _gone, ...source } = INPUT.items.source;
+  const result = validate({ ...INPUT, items: { ...INPUT.items, source } }, goodVerdict(v => {
+    v.suiteType = { type: 'mixed', byDirectory: { './api': 'regression' }, citations: [SIGNALS], reasoning: SUITE_REASON };
+  }));
+  assert.deepEqual(codes(result), ['evidence-outdated']);
 });

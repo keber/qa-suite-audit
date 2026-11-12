@@ -143,3 +143,13 @@ test('a not-extracted item is never emitted', (t) => {
   assert.deepEqual(notExtracted.filter(id => emitted.has(id)), [],
     'emitted now: move the row into its dimension table');
 });
+
+test('D0 is documented as a section before D1 and is not a scored dimension', () => {
+  const { extracted } = parseCatalogue();
+  const headings = fs.readFileSync(CATALOGUE, 'utf8').split(/\r?\n/)
+    .map(l => /^##\s+(D\d+) - (.*\S)\s*$/.exec(l)).filter(Boolean);
+
+  assert.deepEqual(headings.map(h => h[1]).slice(0, 2), ['D0', 'D1'], 'D0 comes first, before D1');
+  assert.match(headings[0][2], /Suite type/);
+  assert.ok(extracted.includes('D0.suite-type-signals'));
+});

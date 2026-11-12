@@ -100,7 +100,12 @@ function render(input, verdict) {
     evidence <code>${escapeHtml(m.shortDigest)}</code> &middot;
     ${m.suiteFiles} test file(s)
   </p>
-
+${m.suiteType ? `  <p class="sub">
+    suite type <strong>${escapeHtml(m.suiteType.type)}</strong>${m.suiteType.byDirectory.length
+      ? ` &middot; ${m.suiteType.byDirectory.map(e => `<code>${escapeHtml(e.directory)}</code> ${escapeHtml(e.type)}`).join(' &middot; ')}`
+      : ''}
+  </p>
+` : ''}
   <div class="headline${m.eliminated ? ' fail' : ''}">
     <div class="score">${m.obtained}<small> / ${m.attainable}</small>${
       m.eliminated ? `<span class="status">DOES NOT PASS</span>` : ''

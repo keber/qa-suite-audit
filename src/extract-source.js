@@ -98,6 +98,14 @@ const UNCONDITIONAL_BODY_SKIP = /\btest\.(skip|fixme)\s*\(\s*true\s*[,)]/;
 const EXPECTED_FAILURE = /\btest\.fail\s*\(/g;
 
 /**
+ * Assertions that compare against a stored baseline instead of against a value
+ * the test states. Counted per test over the MASKED body, so a name inside a
+ * string or a comment is not an assertion. This is a signal for D0.suite-type-
+ * signals only: what a suite does with it is the judge's reading, not a rule.
+ */
+const SNAPSHOT_ASSERTION = /\b(?:toMatchSnapshot|toHaveScreenshot|toMatchAriaSnapshot|toMatchInlineSnapshot)\s*\(/g;
+
+/**
  * Whole-word, case-insensitive matcher for a list of terms.
  *
  * \b is ASCII-only in JavaScript, so word edges are spelled with Unicode
@@ -874,6 +882,7 @@ function extractFile(repoRoot, relPath, caseIdPattern = DEFAULT_CASE_ID, layerIn
       directPageCalls:  countIn(body, DIRECT_PAGE_API),
       conditionalSkips: countIn(body, CONDITIONAL_SKIP),
       expectedFailures: countIn(body, EXPECTED_FAILURE) + (t.declaredFailure ? 1 : 0),
+      snapshotAssertions: countIn(body, SNAPSHOT_ASSERTION),
       selectors: {
         semantic: countIn(body, SEL_SEMANTIC),
         testId:   countIn(body, SEL_TESTID),

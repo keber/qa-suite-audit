@@ -41,6 +41,7 @@ const { selectAdapter }     = require('./adapters/index.js');
 const { buildItems }        = require('./traceability.js');
 const { extractPipelines }  = require('./extract-pipelines.js');
 const { extractMutationConfig } = require('./extract-mutation.js');
+const { suiteTypeSignals }  = require('./suite-type.js');
 
 const THRESHOLDS = JSON.parse(fs.readFileSync(path.join(__dirname, 'thresholds.json'), 'utf8'));
 
@@ -245,8 +246,19 @@ function prepare(repoRoot) {
   // Mutation tooling is a repository-level fact, not a property of any one
   // suite, so it is read from the repository root and joins the source items
   // here, before the digest, rather than inside the per-suite extractor.
-  const source = { ...extracted, items: { ...extracted.items, ...extractMutationConfig(repoRoot) } };
   const specs    = adapter.extract(repoRoot);
+  // D0 reads the spec side only to say which case ids link to a declared rule,
+  // so it joins here, after the adapter and still before the digest.
+  // boundDimensions never reads it: a signal that moved a bound would be
+  // issue #10, which is open on purpose.
+  const source = {
+    ...extracted,
+    items: {
+      ...extracted.items,
+      ...extractMutationConfig(repoRoot),
+      'D0.suite-type-signals': suiteTypeSignals(extracted, boundary, specs),
+    },
+  };
   const pipes    = extractPipelines(repoRoot);
 
   const automatedCaseIds = new Set(
