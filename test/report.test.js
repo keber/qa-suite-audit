@@ -330,6 +330,167 @@ test('the suite type changes no level, status or severity in any renderer', () =
 });
 
 // ---------------------------------------------------------------------------
+// Questions for the team
+// ---------------------------------------------------------------------------
+
+const QUESTIONS = [
+  { id: 'D2.sensitivity-measured', dimension: 2, source: 'cap', unlocks: 3, readByThisRelease: true,
+    question: 'Has any test been verified by breaking the rule it protects on purpose, and where is that recorded?',
+    reason: 'a rule broken on purpose leaves no trace the repository holds' },
+  { id: 'D6.merge-blocking', dimension: 6, source: 'ceiling', unlocks: 3, readByThisRelease: false,
+    question: 'Does a failing run block the merge, and where is that configured?',
+    reason: 'gating lives in the CI server policy' },
+  { id: 'D6.run-scope.ci-yml.12.grep', dimension: 6, source: 'evidence', unlocks: null, readByThisRelease: false,
+    question: 'What does `$(GREP_TAG)` expand to in the pipeline `ci.yml`?',
+    reason: 'the value is set outside the repository' },
+];
+
+const WITH_QUESTIONS = { ...INPUT, teamQuestions: QUESTIONS };
+
+test('the model carries the questions, and tolerates an input that predates them', () => {
+  assert.deepEqual(buildModel(WITH_QUESTIONS, verdict()).teamQuestions.map(q => q.id),
+    ['D2.sensitivity-measured', 'D6.merge-blocking', 'D6.run-scope.ci-yml.12.grep']);
+  assert.deepEqual(buildModel(INPUT, verdict()).teamQuestions, []);
+});
+
+test('the model says which questions this release reads and which are for the reader', () => {
+  const [read, reader, informs] = buildModel(WITH_QUESTIONS, verdict()).teamQuestions;
+
+  assert.equal(read.status, 'read by this release');
+  assert.match(read.effect, /lifts the bound to level 3/);
+  assert.match(read.effect, /committed/);
+
+  assert.equal(reader.status, 'for the reader');
+  assert.match(reader.effect, /bound stays/);
+  assert.ok(!/lifts/.test(reader.effect), 'a question nothing reads must not claim to lift a bound');
+
+  assert.equal(informs.status, 'for the reader');
+  assert.match(informs.effect, /informs only/);
+});
+
+test('the model coerces the dimension and drops what is not a well formed question', () => {
+  const messy = [
+    { ...QUESTIONS[1], dimension: '6' },
+    { ...QUESTIONS[0], dimension: '<b>2</b>' },
+    { ...QUESTIONS[0], dimension: 2.5 },
+    null, 'text', 7, [],
+    { id: 'D6.x', dimension: 6, question: 42 },
+    { ...QUESTIONS[0], unlocks: '<i>3</i>' },
+  ];
+  const got = buildModel({ ...INPUT, teamQuestions: messy }, verdict()).teamQuestions;
+
+  assert.deepEqual(got.map(q => q.dimension), [6, 2], 'a numeric string is coerced, markup is dropped');
+  assert.ok(got.every(q => Number.isInteger(q.dimension)));
+  assert.equal(got[1].unlocks, null, 'an unlocks that is not an integer is not carried');
+  assert.equal(got[1].readByThisRelease, true);
+
+  for (const notAnArray of [null, 'x', 5, { 0: QUESTIONS[0] }]) {
+    assert.deepEqual(buildModel({ ...INPUT, teamQuestions: notAnArray }, verdict()).teamQuestions, []);
+  }
+});
+
+test('the heading and the governing note live in the model and read honestly', () => {
+  const m = buildModel(WITH_QUESTIONS, verdict());
+
+  assert.equal(m.teamQuestionsHeading, 'Questions for the team');
+  assert.match(m.teamQuestionsNote, /read by this release/);
+  assert.match(m.teamQuestionsNote, /for the reader/);
+  assert.match(m.teamQuestionsNote, /committed to the repository/);
+  assert.match(m.teamQuestionsNote, /bound stays/);
+});
+
+test('questions change no level, total or elimination', () => {
+  const a = buildModel(INPUT, verdict());
+  const b = buildModel(WITH_QUESTIONS, verdict());
+  assert.equal(a.obtained, b.obtained);
+  assert.equal(a.eliminated, b.eliminated);
+  assert.deepEqual(a.dimensions.map(d => d.level), b.dimensions.map(d => d.level));
+});
+
+test('the terminal report lists the questions after the dimensions, marking which is which', () => {
+  const lines = list.render(WITH_QUESTIONS, verdict()).split('\n');
+  const heading = lines.findIndex(l => /QUESTIONS FOR THE TEAM/.test(l));
+  const lastDimension = lines.map((l, i) => /^\s+D7 Maintainability/.test(l) ? i : -1).filter(i => i >= 0).pop();
+  const text = lines.join('\n');
+  const m = buildModel(WITH_QUESTIONS, verdict());
+
+  assert.ok(heading > lastDimension, 'after the dimensions');
+  assert.match(text, /Does a failing run block the merge/);
+  assert.match(text, /D2 D2\.sensitivity-measured\s+\[read by this release\]/);
+  assert.match(text, /D6 D6\.merge-blocking\s+\[for the reader\]/);
+  assert.match(text, /lifts the bound to level 3/);
+  assert.match(text, /informs only/);
+  assert.equal(text.replace(/\s+/g, ' ').includes(m.teamQuestionsNote), true, 'the shared note, verbatim');
+});
+
+test('no questions, no section, in every renderer', () => {
+  assert.ok(!/QUESTIONS FOR THE TEAM/.test(list.render(INPUT, verdict())));
+  assert.ok(!/Questions for the team/.test(html.render(INPUT, verdict())));
+  const names = allure.build(INPUT, verdict(), { timestamp: 1 }).map(f => f.name);
+  assert.ok(!names.some(n => n.endsWith('.txt')));
+});
+
+test('the html report shows dimension, question, status and effect, escaped', () => {
+  const hostile = [{ ...QUESTIONS[2], question: 'What does `<img src=x onerror="alert(1)">` expand to?' }, QUESTIONS[0]];
+  const page = html.render({ ...INPUT, teamQuestions: hostile }, verdict());
+  const m = buildModel(WITH_QUESTIONS, verdict());
+
+  assert.match(page, /<h2>Questions for the team<\/h2>/);
+  assert.match(page, /breaking the rule it protects/);
+  assert.match(page, /read by this release/);
+  assert.match(page, /for the reader/);
+  assert.match(page, /lifts the bound to level 3/);
+  assert.ok(page.includes(m.teamQuestionsNote), 'the shared note, verbatim');
+  assert.ok(!page.includes('<img src=x'), 'the raw filter value comes from a repository');
+  assert.match(page, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+});
+
+test('the terminal report strips control and ANSI characters from a question', () => {
+  const q = { ...QUESTIONS[2], question: 'What does `\u001b[31mRED\u001b[0m\u0007x\nINJECT` expand to?', id: 'D6.run-scope.a.1.grep' };
+  const text = list.render({ ...INPUT, teamQuestions: [q] }, verdict());
+
+  assert.ok(!text.includes('\u001b') && !text.includes('\u0007'));
+  assert.ok(!text.split('\n').some(l => l.startsWith('INJECT')), 'a newline must not forge a line');
+  assert.match(text, /REDxINJECT/);
+});
+
+test('allure attaches the questions as one text file on the suite container', () => {
+  const files = allure.build(WITH_QUESTIONS, verdict(), { timestamp: 1 });
+  const container = JSON.parse(files.find(f => f.name.endsWith('-container.json')).body);
+  const m = buildModel(WITH_QUESTIONS, verdict());
+  const fixture = container.befores.find(b => b.name === m.teamQuestionsHeading);
+
+  assert.ok(fixture, 'a suite-level fixture carries them');
+  const [attachment] = fixture.attachments;
+  assert.equal(attachment.type, 'text/plain');
+
+  const file = files.find(f => f.name === attachment.source);
+  assert.ok(file, 'the attachment file is written next to the results');
+  assert.match(file.body, /D6\.merge-blocking/);
+  assert.match(file.body, /Does a failing run block the merge/);
+  assert.match(file.body, /\[read by this release\]/);
+  assert.match(file.body, /\[for the reader\]/);
+  assert.ok(file.body.includes(m.teamQuestionsHeading));
+  assert.ok(file.body.includes(m.teamQuestionsNote), 'the shared note, verbatim');
+  assert.equal(resultsOf(files).length, 7, 'no dimension result was added or changed');
+});
+
+test('the allure attachment name is stable for the same evidence', () => {
+  const a = allure.build(WITH_QUESTIONS, verdict(), { timestamp: 1 }).map(f => f.name).sort();
+  const b = allure.build(WITH_QUESTIONS, verdict(), { timestamp: 2 }).map(f => f.name).sort();
+  assert.deepEqual(a, b);
+});
+
+test('the allure attachment strips control characters so one question stays one line', () => {
+  const q = { ...QUESTIONS[2], question: 'What does `a\nINJECT\u001b[31m` expand to?' };
+  const files = allure.build({ ...INPUT, teamQuestions: [q] }, verdict(), { timestamp: 1 });
+  const body = files.find(f => f.name.endsWith('.txt')).body;
+
+  assert.ok(!/[\u0000-\u0009\u000b-\u001f\u007f]/.test(body.replace(/\n/g, '')));
+  assert.ok(!body.split('\n').some(l => l.startsWith('INJECT')));
+});
+
+// ---------------------------------------------------------------------------
 // Repository-controlled directory names
 // ---------------------------------------------------------------------------
 

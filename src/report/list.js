@@ -13,6 +13,7 @@
 'use strict';
 
 const { buildModel } = require('./model.js');
+const { printable }  = require('../sanitize.js');
 
 const BAR = { filled: '#', empty: '.' };
 
@@ -69,6 +70,20 @@ function render(input, verdict, options = {}) {
     }
   }
 
+  // -- Questions for the team -----------------------------------------------
+
+  if (m.teamQuestions.length) {
+    w('');
+    w(`  ${m.teamQuestionsHeading.toUpperCase()}`);
+    for (const q of m.teamQuestions) {
+      // The id, the question and the effect can carry repository text (a filter value).
+      w(`    D${printable(q.dimension)} ${printable(q.id)}  [${printable(q.status)}]`);
+      w(`       ${wrap(printable(q.question), 68, '       ')}`);
+      w(`       ${wrap(printable(q.effect), 68, '       ')}`);
+    }
+    w(`    ${wrap(printable(m.teamQuestionsNote), 68, '    ')}`);
+  }
+
   // -- What the number hides ------------------------------------------------
 
   if (m.risks) {
@@ -109,19 +124,6 @@ function render(input, verdict, options = {}) {
   }
 
   return out.join('\n');
-}
-
-/**
- * A directory name comes from the audited repository and goes to a terminal, so
- * it is stripped of anything a terminal would act on: ANSI escape sequences
- * first (so their printable tail does not survive), then every remaining
- * control character, which also removes a newline that could forge a line.
- */
-const ANSI_SEQUENCE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-Z\\-_])/g;
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
-
-function printable(text) {
-  return String(text).replace(ANSI_SEQUENCE, '').replace(CONTROL_CHARS, '');
 }
 
 function wrap(text, width, indent) {

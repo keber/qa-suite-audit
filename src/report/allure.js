@@ -25,6 +25,12 @@
  * same thing as one at its ceiling and the dashboard would otherwise show them
  * identically.
  *
+ * The questions for the team are not a dimension and have no level, so they get
+ * no result of their own: that would add a row to the trend and a status to a
+ * thing that has none. There is no suite-level result in this mapping either,
+ * only the suite container, so they ride on it as a `Questions for the team`
+ * setup fixture with one text/plain attachment, one question per line.
+ *
  * historyId is derived from repo and dimension, so Allure lines up the same
  * dimension across runs and the trend is real. uuid is derived from the
  * evidence digest, so re-rendering the same audit does not invent a new run.
@@ -56,6 +62,14 @@ function propertyValue(value) {
     .replace(/\r/g, '\\r')
     .replace(/\t/g, '\\t')
     .replace(/[\u0000-\u001f\u007f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/**
+ * Repository text for a plain-text attachment: control characters, which
+ * include the newline that could forge a line, become a space.
+ */
+function plainLine(value) {
+  return String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
 }
 
 function statusOf(d) {
@@ -149,11 +163,30 @@ function build(input, verdict, options = {}) {
     return result;
   });
 
+  const befores = [];
+  if (m.teamQuestions.length) {
+    // Named from the digest like every other file, so re-rendering one audit
+    // writes the same attachment rather than a new one.
+    const source = `${id(m.digest, 'team-questions')}-attachment.txt`;
+    const entries = m.teamQuestions.map(q =>
+      `D${plainLine(q.dimension)} ${plainLine(q.id)} [${plainLine(q.status)}]\n` +
+      `${plainLine(q.question)}\n${plainLine(q.effect)}`);
+    const body = [m.teamQuestionsHeading, plainLine(m.teamQuestionsNote), ...entries].join('\n\n');
+    files.push({ name: source, body: body + '\n' });
+
+    befores.push({
+      name: m.teamQuestionsHeading,
+      status: 'passed', stage: 'finished', start, stop,
+      parameters: [], steps: [],
+      attachments: [{ name: m.teamQuestionsHeading, source, type: 'text/plain' }],
+    });
+  }
+
   const container = {
     uuid: containerUuid,
     name: `Suite audit - ${m.repo}`,
     children: results.map(r => r.uuid),
-    befores: [], afters: [],
+    befores, afters: [],
     start, stop,
   };
   files.push({ name: `${containerUuid}-container.json`, body: JSON.stringify(container, null, 2) });

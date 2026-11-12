@@ -130,6 +130,7 @@ ${m.dimensions.map(d => dimensionRow(d)).join('\n')}
     </tbody>
   </table>
 
+${m.teamQuestions.length ? questionsSection(m) : ''}
 ${m.risks ? riskPanel(m) : ''}
 ${m.calibratedDecisions.length ? calibrationPanel(m) : ''}
 ${m.lowConfidence.length ? `
@@ -185,6 +186,30 @@ function dimensionRow(d) {
           <span class="meter">${meter}</span></td>
         <td class="reason">${escapeHtml(d.ceilingReason)}</td>
       </tr>`;
+}
+
+/** Question and id can carry repository text (a filter value), so both are escaped. */
+function questionsSection(m) {
+  return `
+  <h2>${escapeHtml(m.teamQuestionsHeading)}</h2>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Question</th><th>What an answer does</th></tr>
+    </thead>
+    <tbody>
+${m.teamQuestions.map(q => `      <tr>
+        <td class="num">D${escapeHtml(q.dimension)}</td>
+        <td>
+          ${escapeHtml(q.question)}
+          <div class="reason">${escapeHtml(q.reason)}</div>
+          <div class="cites">${escapeHtml(q.id)}</div>
+        </td>
+        <td><span class="tag${q.readByThisRelease ? ' warn' : ''}">${escapeHtml(q.status)}</span>
+          <div class="reason">${escapeHtml(q.effect)}</div></td>
+      </tr>`).join('\n')}
+    </tbody>
+  </table>
+  <p class="reason">${escapeHtml(m.teamQuestionsNote)}</p>`;
 }
 
 function riskPanel(m) {
