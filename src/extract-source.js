@@ -11,6 +11,7 @@
  *                          D2.skipped-tests       D3.serial-mode
  *   D5.priority-distribution
  *   D5.skip-ratio          D4.trace-config        D7.selector-mix
+ *                          D3.flaky-markers
  *                          D4.reporter-config
  *                          D4.artifact-retention
  *
@@ -96,6 +97,20 @@ const UNCONDITIONAL_BODY_SKIP = /\btest\.(skip|fixme)\s*\(\s*true\s*[,)]/;
 const EXPECTED_FAILURE = /\btest\.fail\s*\(/g;
 
 /**
+ * Whole-word, case-insensitive matcher for a list of terms.
+ *
+ * \b is ASCII-only in JavaScript, so word edges are spelled with Unicode
+ * classes. A space inside a term matches any run of whitespace. Shared by every
+ * vocabulary below so they agree on what a word edge is.
+ */
+const WORD_START = '(?<![\\p{L}\\p{N}_])';
+const WORD_END   = '(?![\\p{L}\\p{N}_])';
+
+function wordMatcher(terms) {
+  return new RegExp(`${WORD_START}(?:${terms.map(t => t.replace(/ /g, '\\s+')).join('|')})${WORD_END}`, 'iu');
+}
+
+/**
  * Negative and boundary vocabulary for D5.negative-tests, in ONE place, English
  * and Spanish, because suites are written in both.
  *
@@ -120,11 +135,7 @@ const EXPECTED_FAILURE = /\btest\.fail\s*\(/g;
  * it asserts the success path.
  */
 const NEGATIVE_VOCABULARY = (() => {
-  // \b is ASCII-only in JavaScript, so word edges are spelled with Unicode
-  // classes. A space inside a term matches any run of whitespace.
-  const START = '(?<![\\p{L}\\p{N}_])';
-  const END   = '(?![\\p{L}\\p{N}_])';
-  const words = (terms) => new RegExp(`${START}(?:${terms.map(t => t.replace(/ /g, '\\s+')).join('|')})${END}`, 'iu');
+  const words = wordMatcher;
 
   return {
     negativeTitle: words([
@@ -148,6 +159,31 @@ const NEGATIVE_VOCABULARY = (() => {
     negativeBody: /(?<!\.not)\.toThrow(?:Error)?\s*\(|\.rejects\s*\.|\btoHaveStatus\s*\(\s*[45]\d\d\b|\bstatus(?:\s*\(\s*\))?\s*\)\s*\.(?:toBe|toEqual|toStrictEqual)\s*\(\s*[45]\d\d\b/,
   };
 })();
+
+/**
+ * What a suite says about its own determinism, for D3.flaky-markers.
+ *
+ * Two readings, kept apart on purpose:
+ *   - flakyTitle: the @flaky tag, matched against a test title or a tag value.
+ *     It is a convention, so it needs the "@" and a word edge after it.
+ *   - flakyComment: prose in COMMENTS only. A string literal that happens to
+ *     say "flaky" is test data, not a confession. The vocabulary is written
+ *     unaccented and matched after accents are folded, like the negative lists.
+ *
+ * Evidence for the judge, never a threshold: a comment that says "race
+ * condition" may describe the application under test rather than the test.
+ */
+const FLAKY_VOCABULARY = {
+  flakyTitle: new RegExp(`(?<![\\p{L}\\p{N}_])@flaky${WORD_END}`, 'iu'),
+  flakyComment: wordMatcher([
+    // English
+    'flaky', 'flakey', 'flakiness', 'intermittent(?:ly)?', 'unstable', 'sometimes fails', 'fails randomly',
+    'race conditions?',
+    // Spanish (unaccented)
+    'inestables?', 'intermitentes?', 'falla a veces', 'a veces falla', 'falla aleatoriamente',
+    'condicion(?:es)? de carrera',
+  ]),
+};
 
 /** Strip accents so one unaccented vocabulary covers both spellings. */
 function foldAccents(text) {
@@ -213,6 +249,75 @@ function blank(out, i) {
   if (out[i] !== undefined && out[i] !== '\n') out[i] = ' ';
 }
 
+/**
+ * Offset ranges [start, end) of every comment, using the same quote tracking as
+ * maskSource so a "//" inside a string is not a comment.
+ *
+ * maskSource cannot be diffed against the raw text to find comments: it blanks
+ * string contents too, so a changed character does not say which kind it was.
+ */
+function findComments(src) {
+  const ranges = [];
+  let i = 0;
+  let quote = null;
+
+  while (i < src.length) {
+    const c = src[i];
+    const n = src[i + 1];
+
+    if (quote) {
+      if (c === '\\') { i += 2; continue; }
+      if (c === quote) quote = null;
+      i++; continue;
+    }
+
+    if (c === '"' || c === "'" || c === '`') { quote = c; i++; continue; }
+
+    if (c === '/' && n === '/') {
+      const end = src.indexOf('\n', i);
+      const stop = end === -1 ? src.length : end;
+      ranges.push([i, stop]);
+      i = stop; continue;
+    }
+
+    if (c === '/' && n === '*') {
+      const end  = src.indexOf('*/', i + 2);
+      const stop = end === -1 ? src.length : end + 2;
+      ranges.push([i, stop]);
+      i = stop; continue;
+    }
+
+    i++;
+  }
+
+  return ranges;
+}
+
+/** The source with every comment blanked (offsets and newlines preserved) and strings intact. */
+function blankComments(src, ranges = findComments(src)) {
+  const out = src.split('');
+  for (const [from, to] of ranges) for (let j = from; j < to; j++) blank(out, j);
+  return out.join('');
+}
+
+/**
+ * Lines of comments that talk about flakiness, as 'file:line' references.
+ * Read from the raw text, but only inside comment ranges. A block comment is
+ * judged line by line so each hit points at the line a reader should open.
+ */
+function scanFlakyComments(src, relPath) {
+  const hits = [];
+
+  for (const [from, to] of findComments(src)) {
+    const firstLine = lineAt(src, from);
+    src.slice(from, to).split('\n').forEach((text, k) => {
+      if (FLAKY_VOCABULARY.flakyComment.test(foldAccents(text))) hits.push(`${relPath}:${firstLine + k}`);
+    });
+  }
+
+  return hits;
+}
+
 /** Index of the ')' closing the '(' at openIdx, or -1. */
 function matchParen(masked, openIdx) {
   let depth = 0;
@@ -247,6 +352,9 @@ const DECLARATION = /\btest\s*(?:\.\s*(describe|skip|only|fixme|step|fail|slow)\
  */
 function findTests(src) {
   const masked = maskSource(src);
+  // Strings kept, comments gone: the tag and annotation options are read from
+  // here so a commented-out `tag: '@flaky'` is not a tag.
+  const uncommented = blankComments(src);
   const groups = [];
   const tests  = [];
 
@@ -282,6 +390,7 @@ function findTests(src) {
       // Declared as expected to fail. The body slice starts after the call
       // name, so a declaration-level test.fail is invisible to a body scan.
       declaredFailure: kind === 'fail' || modifier === 'fail',
+      flakyTag: hasFlakyTag(title, uncommented.slice(openIdx + 1, closeIdx), argsMasked),
     };
 
     if (kind === 'describe') groups.push(record);
@@ -295,9 +404,36 @@ function findTests(src) {
       t.group = owner.title;
       if (owner.skipped) t.skipped = true;
     }
+    // A tag on any enclosing describe, at any depth, applies to the test.
+    if (groups.some(g => g.flakyTag && g.start < t.start && t.end < g.end)) t.flakyTag = true;
   }
 
   return { tests, groups, masked };
+}
+
+/**
+ * Is a declaration marked flaky: @flaky in its title, a `tag:` option holding
+ * @flaky, or an `annotation` with type 'flaky'.
+ *
+ * Options sit between the title and the callback, so only that stretch is read.
+ * Reading the whole argument list of a describe would pick up tags that belong
+ * to the tests inside it, and those are attributed to their own declarations.
+ * argsRaw has comments blanked; argsMasked locates the callback.
+ */
+function hasFlakyTag(title, argsRaw, argsMasked) {
+  if (FLAKY_VOCABULARY.flakyTitle.test(title)) return true;
+
+  const q = /^\s*(['"`])/.exec(argsRaw);
+  if (!q) return false;
+  const afterTitle = argsRaw.indexOf(q[1]) + 1 + title.length + 1;
+  const callback   = argsMasked.search(/=>|\bfunction\b/);
+  const options    = argsRaw.slice(afterTitle, callback === -1 ? argsRaw.length : callback);
+
+  const tag = /\btag\s*:\s*(\[[^\]]*\]|['"`][^'"`]*['"`])/.exec(options);
+  if (tag && FLAKY_VOCABULARY.flakyTitle.test(tag[1])) return true;
+
+  const annotation = /\bannotation\s*:\s*(\{[^{}]*\}|\[[\s\S]*?\])/.exec(options);
+  return Boolean(annotation && /\btype['"`]?\s*:\s*(['"`])flaky\1/i.test(annotation[1]));
 }
 
 function readFirstString(argsRaw) {
@@ -392,6 +528,7 @@ function extractFile(repoRoot, relPath, caseIdPattern = DEFAULT_CASE_ID) {
       negativeSignal:
         NEGATIVE_VOCABULARY.negativeTitle.test(foldAccents(title)) || NEGATIVE_VOCABULARY.negativeBody.test(body),
       boundarySignal: NEGATIVE_VOCABULARY.boundaryTitle.test(foldAccents(title)),
+      flakyTag: Boolean(t.flakyTag),
       assertions,
       softAssertions:  countIn(body, SOFT_ASSERTION),
       weakAssertions:   countIn(body, WEAK_ASSERTION),
@@ -477,7 +614,12 @@ function ratio(a, b) {
   return b === 0 ? null : Math.round((a / b) * 1000) / 1000;
 }
 
-function aggregate(records) {
+/**
+ * @param {object[]} records per-test records
+ * @param {{flakyComments?: string[]}} [extras] facts that live outside any test
+ *   body and so cannot be derived from records: here, comment lines per file.
+ */
+function aggregate(records, extras = {}) {
   const total   = records.length;
   const active  = records.filter(r => !r.skipped);
   const sum     = (f) => records.reduce((n, r) => n + f(r), 0);
@@ -490,6 +632,8 @@ function aggregate(records) {
   const semantic      = sum(r => r.selectors.semantic);
   const testId        = sum(r => r.selectors.testId);
   const rawSelectors  = sum(r => r.selectors.raw);
+  const flakyTagged   = records.filter(r => r.flakyTag).map(ref).sort();
+  const flakyComments = [...(extras.flakyComments ?? [])].sort();
 
   return {
     // D1
@@ -517,6 +661,13 @@ function aggregate(records) {
     // D3
     'D3.fixed-waits':       { count: sum(r => r.fixedWaits), perTest: ratio(sum(r => r.fixedWaits), total), tests: records.filter(r => r.fixedWaits > 0).map(ref).sort() },
     'D3.conditional-waits': { count: sum(r => r.conditionalWaits), perTest: ratio(sum(r => r.conditionalWaits), total) },
+    // Every test, skipped or not: a suite's own admission of non-determinism
+    // does not depend on the test currently running. Evidence for the judge.
+    'D3.flaky-markers': {
+      count: flakyTagged.length + flakyComments.length,
+      tags: { count: flakyTagged.length, tests: flakyTagged },
+      comments: { count: flakyComments.length, at: flakyComments },
+    },
 
     // D4
     'D4.failure-context': { steps: sum(r => r.steps), testsWithSteps: records.filter(r => r.steps > 0).length },
@@ -624,12 +775,16 @@ function extractEvidence(repoRoot, options = {}) {
         configuredSerial: a.configuredSerial + b.configuredSerial,
       }), { describeSerial: 0, configuredSerial: 0 });
 
+    const flakyComments = suite.files.flatMap(f =>
+      scanFlakyComments(fs.readFileSync(path.join(repoRoot, f), 'utf8'), f));
+
     return {
       id: suite.id,
       config: suite.config,
       configEvidence: extractConfig(repoRoot, suite.config),
       serialDeclarations,
-      items: aggregate(records),
+      flakyComments,
+      items: aggregate(records, { flakyComments }),
       tests: records.sort((a, b) => (a.file + a.line).localeCompare(b.file + b.line)),
     };
   });
@@ -651,7 +806,7 @@ function extractEvidence(repoRoot, options = {}) {
       testFiles: boundary.totals.testFiles,
       unclaimed: boundary.totals.unclaimed,
     },
-    items: { ...aggregate(all), ...configItems(suites) },
+    items: { ...aggregate(all, { flakyComments: suites.flatMap(s => s.flakyComments) }), ...configItems(suites) },
     suites,
     warnings: boundary.warnings,
   };
@@ -673,6 +828,7 @@ function printHuman(result) {
   console.log(`  D2.indirect-assert.   ${i['D2.indirect-assertions'].count} tests assert only via helpers (${i['D2.indirect-assertions'].proxyCalls} proxy calls)`);
   console.log(`  D3.fixed-waits        ${i['D3.fixed-waits'].count}  (${i['D3.fixed-waits'].perTest} per test)`);
   console.log(`  D3.conditional-waits  ${i['D3.conditional-waits'].count}`);
+  console.log(`  D3.flaky-markers      ${i['D3.flaky-markers'].tags.count} tagged tests, ${i['D3.flaky-markers'].comments.count} comment lines`);
   console.log(`  D4.failure-context    ${i['D4.failure-context'].steps} steps in ${i['D4.failure-context'].testsWithSteps} tests`);
   console.log(`  D7.selector-mix       semantic=${i['D7.selector-mix'].semantic} testId=${i['D7.selector-mix'].testId} raw=${i['D7.selector-mix'].raw}  share=${i['D7.selector-mix'].semanticShare}`);
   console.log('');
@@ -710,4 +866,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { extractEvidence, extractFile, findTests, maskSource, aggregate, countSerialDeclarations, DEFAULT_CASE_ID, NEGATIVE_VOCABULARY };
+module.exports = { extractEvidence, extractFile, findTests, maskSource, findComments, scanFlakyComments, aggregate, countSerialDeclarations, DEFAULT_CASE_ID, NEGATIVE_VOCABULARY };

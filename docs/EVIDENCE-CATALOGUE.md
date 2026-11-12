@@ -160,6 +160,7 @@ D5, and a high ratio caps this dimension regardless of the rest.
 |---|---|---|
 | `D3.fixed-waits` | `waitForTimeout`, `sleep`, bare `setTimeout` in test code | regex, normalized per test |
 | `D3.conditional-waits` | `waitForSelector`, `waitForLoadState`, expect polling | regex |
+| `D3.flaky-markers` | the suite's own admissions of non-determinism: `tags` lists tests marked `@flaky` in a title, a `tag:` option or an `annotation: { type: 'flaky' }` (a marked `describe` marks the tests inside it); `comments` lists each comment line that says flaky, flakey, flakiness, intermittent, unstable, sometimes fails, fails randomly or race condition, or the Spanish inestable, intermitente, falla a veces, a veces falla, falla aleatoriamente, condicion de carrera (accent-insensitive); `count` is both together | tag scan on declarations; comment-only scan (strings in code never count) |
 | `D3.retries-config` | configured retries, verbatim (`2` or `process.env.CI ? 2 : 1`), reported per suite as `bySuite[<suite id>].retries` | config read |
 | `D3.serial-mode` | per suite: `fullyParallel` and `workers` as configured, plus counts of `describe.serial` and `describe.configure({ mode: 'serial' })` in the suite's files | config read and masked-source scan |
 
@@ -171,6 +172,9 @@ enforced today.
 
 **Left to judgment:** whether retries are a load-tolerance decision or a flake
 suppressor. Configs sometimes explain themselves in comments; the agent reads them.
+`D3.flaky-markers` is evidence, not a threshold: a comment that says "race
+condition" may describe the application rather than the test, and a suite
+that never writes the word is not thereby deterministic. Open the listed lines.
 
 ---
 

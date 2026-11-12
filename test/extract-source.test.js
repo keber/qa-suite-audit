@@ -709,3 +709,151 @@ test('the vocabulary is exported as one constant holding both lists and the body
   assert.ok(NEGATIVE_VOCABULARY.boundaryTitle instanceof RegExp);
   assert.ok(NEGATIVE_VOCABULARY.negativeBody instanceof RegExp);
 });
+
+// ---------------------------------------------------------------------------
+// D3.flaky-markers: a suite's own confession that a test is not deterministic
+// ---------------------------------------------------------------------------
+
+function flakyItem(t, source) {
+  const root = makeRepo(t, { 'playwright.config.ts': CONFIG, 'tests/a.spec.ts': source });
+  return extractEvidence(root).items['D3.flaky-markers'];
+}
+
+const FLAKY_HEAD = "import { test, expect } from '@playwright/test';\n";
+const FLAKY_BODY = " async ({ page }) => { await expect(page).toHaveTitle('x'); }";
+
+test('flaky-markers counts an @flaky title, case-insensitively and word-bounded', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + [
+    `test('[TC-A-001] login @flaky',${FLAKY_BODY});`,
+    `test('[TC-A-002] logout @FLAKY',${FLAKY_BODY});`,
+    `test('[TC-A-003] stable @flakyness',${FLAKY_BODY});`,
+    `test('[TC-A-004] plain',${FLAKY_BODY});`,
+  ].join('\n'));
+
+  assert.deepEqual(item.tags.tests, ['tests/a.spec.ts:2', 'tests/a.spec.ts:3']);
+  assert.equal(item.tags.count, 2);
+  assert.equal(item.count, 2);
+});
+
+test('flaky-markers reads a Playwright tag option and an annotation, on tests and describes', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + [
+    `test('[TC-A-001] one', { tag: '@flaky' },${FLAKY_BODY});`,
+    `test('[TC-A-002] two', { tag: ['@smoke', '@flaky'] },${FLAKY_BODY});`,
+    `test('[TC-A-003] three', { annotation: { type: 'flaky', description: 'race' } },${FLAKY_BODY});`,
+    `test('[TC-A-004] four', { tag: '@smoke' },${FLAKY_BODY});`,
+    `test('[TC-A-005] five', { annotation: { type: 'issue', description: 'flaky' } },${FLAKY_BODY});`,
+    "test.describe('group', { tag: '@flaky' }, () => {",
+    `  test('[TC-A-006] six',${FLAKY_BODY});`,
+    '});',
+  ].join('\n'));
+
+  // A flaky describe marks the tests inside it; the describe line itself is not a test.
+  assert.deepEqual(item.tags.tests, [
+    'tests/a.spec.ts:2', 'tests/a.spec.ts:3', 'tests/a.spec.ts:4', 'tests/a.spec.ts:8',
+  ]);
+});
+
+test('flaky-markers: a describe titled @flaky marks the tests inside it', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + [
+    "test.describe('checkout @flaky', () => {",
+    `  test('[TC-A-001] pays',${FLAKY_BODY});`,
+    '});',
+  ].join('\n'));
+
+  assert.deepEqual(item.tags.tests, ['tests/a.spec.ts:3']);
+});
+
+test('flaky-markers records a boolean flakyTag on each test', (t) => {
+  const records = recordsFor(t, FLAKY_HEAD + [
+    `test('[TC-A-001] a @flaky',${FLAKY_BODY});`,
+    `test('[TC-A-002] b',${FLAKY_BODY});`,
+  ].join('\n'));
+
+  assert.deepEqual(records.map(r => r.flakyTag), [true, false]);
+});
+
+test('flaky-markers: a string literal in code is not a marker', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + [
+    "const label = 'this test is flaky and unstable';",
+    `test('[TC-A-001] shows the word', async ({ page }) => {`,
+    "  await expect(page.locator('#t')).toHaveText('flaky, sometimes fails');",
+    '});',
+  ].join('\n'));
+
+  assert.equal(item.count, 0);
+  assert.deepEqual(item.tags.tests, []);
+  assert.deepEqual(item.comments.at, []);
+});
+
+test('flaky-markers: a comment is a comment marker and never a tag', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + [
+    '// @flaky: fails on slow runners',
+    `test('[TC-A-001] plain', { /* tag: '@flaky' */ },${FLAKY_BODY});`,
+  ].join('\n'));
+
+  assert.equal(item.tags.count, 0);
+  // Both lines are comments that name the problem; neither is a tag.
+  assert.deepEqual(item.comments.at, ['tests/a.spec.ts:2', 'tests/a.spec.ts:3']);
+  assert.equal(item.count, 2);
+});
+
+test('flaky-markers reads single-line and block comments, one hit per line', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + [
+    '// this one is flaky, really intermittent', // line 2: two words, one hit
+    `test('[TC-A-001] a',${FLAKY_BODY});`,
+    '/**',                                       // line 4
+    ' * Unstable on CI.',                        // line 5
+    ' * nothing to see here',                     // line 6
+    ' * race condition with the toast',          // line 7
+    ' */',
+    `test('[TC-A-002] b',${FLAKY_BODY}); // sometimes fails after deploy`, // line 9
+    '// all good here',
+  ].join('\n'));
+
+  assert.deepEqual(item.comments.at, [
+    'tests/a.spec.ts:2', 'tests/a.spec.ts:5', 'tests/a.spec.ts:7', 'tests/a.spec.ts:9',
+  ]);
+  assert.equal(item.comments.count, 4);
+});
+
+test('flaky-markers matches the English vocabulary', (t) => {
+  const phrases = ['flaky', 'flakey', 'flakiness', 'intermittent', 'intermittently', 'unstable', 'sometimes fails', 'fails randomly', 'race condition'];
+  const item = flakyItem(t, FLAKY_HEAD + phrases.map(p => `// note: ${p}`).join('\n'));
+  assert.equal(item.comments.count, phrases.length);
+});
+
+test('flaky-markers matches the Spanish vocabulary, accent-insensitively', (t) => {
+  const phrases = [
+    'inestable', 'intermitente', 'falla a veces', 'a veces falla', 'falla aleatoriamente',
+    'condicion de carrera', 'condición de carrera', 'Condición De Carrera', 'INESTABLE',
+  ];
+  const item = flakyItem(t, FLAKY_HEAD + phrases.map(p => `// nota: ${p}`).join('\n'));
+  assert.equal(item.comments.count, phrases.length);
+});
+
+test('flaky-markers uses Unicode word edges, not ASCII ones', (t) => {
+  // Longer words that merely contain a term. A term next to an accented
+  // letter must not match either, which an ASCII-only \b gets wrong.
+  const item = flakyItem(t, FLAKY_HEAD + [
+    '// reinestable and inestablez and unstableness are other words',
+    '// flakyé and éflaky are not the word',
+    '// stable and flakyish and intermittentes2 do not count either',
+    '// sin falla a veces2 tampoco',
+  ].join('\n'));
+  assert.equal(item.comments.count, 0);
+});
+
+test('flaky-markers is evidence only: no level, score, verdict, rating, threshold, cap or bound', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + `// flaky\ntest('[TC-A-001] a @flaky',${FLAKY_BODY});`);
+  assert.deepEqual(Object.keys(item).sort(), ['comments', 'count', 'tags']);
+
+  const json = JSON.stringify(item);
+  for (const key of ['level', 'score', 'verdict', 'rating', 'threshold', 'cap', 'bound']) {
+    assert.ok(!json.includes(`"${key}"`), `evidence must not contain a ${key} key`);
+  }
+});
+
+test('flaky-markers covers every resolved suite file and is emitted with zero counts when clean', (t) => {
+  const item = flakyItem(t, FLAKY_HEAD + `test('[TC-A-001] a',${FLAKY_BODY});`);
+  assert.deepEqual(item, { count: 0, tags: { count: 0, tests: [] }, comments: { count: 0, at: [] } });
+});
