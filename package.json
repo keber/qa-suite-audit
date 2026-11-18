@@ -12,6 +12,7 @@
     "allure"
   ],
   "license": "MIT",
+  "author": "Keber Flores",
   "main": "src/judge-prep.js",
   "bin": {
     "qa-suite-audit": "bin/qa-suite-audit.js"
